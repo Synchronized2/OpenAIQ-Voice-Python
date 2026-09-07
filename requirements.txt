@@ -1,0 +1,17 @@
+edge-tts>=7.2.0
+openai>=1.99.0,<3
+pygame>=2.6.1
+sounddevice>=0.4.6
+numpy==1.26.4
+torch==2.6.0
+torchaudio==2.6.0
+funasr==1.2.7
+modelscope==1.39.1
+soundfile==0.13.1
+kaldiio==2.18.1
+kaldi-native-fbank==1.22.3
+PySide6-Essentials>=6.8.0,<7
+pycaw>=20240210
+screen-brightness-control>=0.24.2
+pypinyin>=0.55.0
+winsdk==1.0.0b10; sys_platform == "win32"

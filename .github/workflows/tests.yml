@@ -1,0 +1,23 @@
+name: Windows tests
+on:
+  push:
+  pull_request:
+jobs:
+  test:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.11', '3.12']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Install without downloading models
+        shell: pwsh
+        run: ./setup.ps1 -SkipModels
+      - name: Unit and offscreen UI tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ./.venv/Scripts/python.exe -m unittest discover -s tests -v

@@ -1,0 +1,58 @@
+{
+  "models": [
+    {
+      "directory": "paraformer-large",
+      "repo": "iic/speech_paraformer-large_asr_nat-zh-cn-16k-common-vocab8404-pytorch",
+      "revision": "v2.0.5",
+      "files": [
+        {
+          "path": "model.pt",
+          "bytes": 880502012,
+          "sha256": "5bba782a5e9196166233b9ab12ba04cadff9ef9212b4ff6153ed9290ff679025"
+        },
+        {
+          "path": "config.yaml",
+          "bytes": 2509,
+          "sha256": "bfd424b9f61846aac63591e96fe24d66b35f4643bddcb4b9bb759db8f987ab79"
+        },
+        {
+          "path": "configuration.json",
+          "bytes": 472,
+          "sha256": "b7d2917954fc547e43ad61486a5248596738cf5909907eade11e71c56f446f34"
+        },
+        {
+          "path": "am.mvn",
+          "bytes": 11203,
+          "sha256": "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5"
+        },
+        {
+          "path": "tokens.json",
+          "bytes": 93676,
+          "sha256": "2b20c2b12572d682afff84ce1c8d560f67b8b32a4c1f21567411d141ed352127"
+        },
+        {
+          "path": "seg_dict",
+          "bytes": 8287834,
+          "sha256": "59a2ef803a3f1648ad03a2e1480db1c1ee0c0d7dc4ef4dbd16cea33944329022"
+        }
+      ]
+    },
+    {
+      "directory": "FireRedVAD",
+      "repo": "xukaituo/FireRedVAD",
+      "revision": "master",
+      "files": [
+        {
+          "path": "Stream-VAD/model.pth.tar",
+          "bytes": 2283513,
+          "sha256": "ec88a8ae8ac5f004cdbd20c1eac4a9e9d12067c3d51ac5b141afa1f921fb59c9"
+        },
+        {
+          "path": "Stream-VAD/cmvn.ark",
+          "bytes": 1311,
+          "sha256": "c87f6f13edf0f0ec7535ddfc9cc3387d9268cb234b70182d566c5e2edf3ca473"
+        }
+      ]
+    }
+  ]
+}
