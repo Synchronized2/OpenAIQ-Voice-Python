@@ -5,6 +5,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 
 import edge_tts
@@ -14,15 +15,39 @@ from edge_tts.exceptions import NoAudioReceived
 import config
 from cancellation import OperationCancelled, run_cancellable
 from diagnostics import log
+from voices import clamp_volume
+
+
+@dataclass(frozen=True)
+class SpeechOptions:
+    voice: str
+    rate: str
+    volume: float
 
 
 class EdgeSpeaker:
-    def __init__(self, on_segment_start: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        on_segment_start: Callable[[str], None] | None = None,
+        *,
+        voice: str | None = None,
+        rate: str | None = None,
+        volume: float | None = None,
+    ) -> None:
         pygame.mixer.init()
-        self._text_queue: queue.Queue[tuple[str, threading.Event] | None] = queue.Queue()
-        self._audio_queue: queue.Queue[tuple[Path, str, threading.Event] | None] = queue.Queue()
+        self._text_queue: queue.Queue[tuple[str, threading.Event, SpeechOptions] | None] = queue.Queue()
+        self._audio_queue: queue.Queue[tuple[Path, str, threading.Event, SpeechOptions] | None] = queue.Queue()
         self._turn_lock = threading.RLock()
         self._on_segment_start = on_segment_start
+        self._options = SpeechOptions(
+            voice=(voice or config.TTS_VOICE).strip(),
+            rate=(rate or config.TTS_RATE).strip(),
+            volume=clamp_volume(
+                getattr(config, "TTS_VOLUME", 1.0) if volume is None else volume
+            ),
+        )
+        self._synth_options = self._options
+        self._play_options = self._options
         self._active_segment = ""
         self._error: Exception | None = None
         self._error_lock = threading.Lock()
@@ -79,7 +104,13 @@ class EdgeSpeaker:
         text = text.strip()
         with self._turn_lock:
             if text and not self._cancelled.is_set() and not self._closed:
-                self._text_queue.put((text, self._cancelled))
+                self._text_queue.put((text, self._cancelled, self._options))
+
+    def configure(self, *, voice: str, rate: str, volume: float) -> None:
+        with self._turn_lock:
+            self._options = SpeechOptions(
+                voice=voice.strip(), rate=rate.strip(), volume=clamp_volume(volume)
+            )
 
     def wait(self) -> None:
         # Text must first become audio before the audio queue can be considered complete.
@@ -118,8 +149,9 @@ class EdgeSpeaker:
             try:
                 if item is None:
                     return
-                text, cancelled = item
+                text, cancelled, options = item
                 self._synth_cancel = cancelled
+                self._synth_options = options
                 if cancelled.is_set() or self._failed.is_set():
                     continue
                 path = self._new_temp_path()
@@ -129,7 +161,7 @@ class EdgeSpeaker:
                         if cancelled.is_set() or self._failed.is_set():
                             path.unlink(missing_ok=True)
                         else:
-                            self._audio_queue.put((path, text, cancelled))
+                            self._audio_queue.put((path, text, cancelled, options))
                 except Exception:
                     path.unlink(missing_ok=True)
                     raise
@@ -149,7 +181,7 @@ class EdgeSpeaker:
             try:
                 if item is None:
                     return
-                path, self._active_segment, self._play_cancel = item
+                path, self._active_segment, self._play_cancel, self._play_options = item
                 if not self._play_cancel.is_set() and not self._failed.is_set():
                     self._play(path)
             except Exception as exc:
@@ -171,6 +203,7 @@ class EdgeSpeaker:
             if cancelled.is_set():
                 return
             pygame.mixer.music.load(str(path))
+            pygame.mixer.music.set_volume(self._play_options.volume)
             pygame.mixer.music.play()
             log.info("tts.play generation=%s chars=%s", id(cancelled), len(self._active_segment))
             self.playing.set()
@@ -231,7 +264,7 @@ class EdgeSpeaker:
                 return
             else:
                 if item is not None:
-                    path, _text, _cancelled = item
+                    path, _text, _cancelled, _options = item
                     path.unlink(missing_ok=True)
                 self._audio_queue.task_done()
 
@@ -251,8 +284,8 @@ class EdgeSpeaker:
             try:
                 communicate = edge_tts.Communicate(
                     text,
-                    config.TTS_VOICE,
-                    rate=config.TTS_RATE,
+                    self._synth_options.voice,
+                    rate=self._synth_options.rate,
                     connect_timeout=10,
                     receive_timeout=60,
                 )

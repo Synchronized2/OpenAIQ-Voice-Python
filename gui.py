@@ -56,6 +56,14 @@ from diagnostics import configure_logging, log
 from runtime_state import RuntimeMachine, RuntimeState
 from tts import EdgeSpeaker
 from voice_session import BargeSession
+from voices import (
+    DEFAULT_EDGE_VOICE,
+    EDGE_VOICES,
+    clamp_rate_step,
+    clamp_volume,
+    edge_rate,
+    normalize_voice,
+)
 from wake import WakeWordDetector
 
 
@@ -76,6 +84,22 @@ def default_pet_size() -> int:
 
 def default_animation_fps() -> int:
     return clamp_int(getattr(config, "UI_ANIMATION_FPS", 22), 10, 60, 22)
+
+
+def default_tts_voice() -> str:
+    return normalize_voice(getattr(config, "TTS_VOICE", DEFAULT_EDGE_VOICE))
+
+
+def default_tts_rate_step() -> int:
+    value = str(getattr(config, "TTS_RATE", "+0%")).strip().removesuffix("%")
+    try:
+        return clamp_rate_step(round(int(value) / 6))
+    except ValueError:
+        return 0
+
+
+def default_tts_volume_percent() -> int:
+    return round(clamp_volume(getattr(config, "TTS_VOLUME", 1.0)) * 100)
 
 
 def animation_interval_ms(fps: int) -> int:
@@ -104,6 +128,11 @@ def load_ui_preferences() -> dict:
         ),
         "ui_animation_fps": clamp_int(
             data.get("ui_animation_fps"), 10, 60, default_animation_fps()
+        ),
+        "tts_voice": normalize_voice(data.get("tts_voice"), default_tts_voice()),
+        "tts_rate": clamp_rate_step(data.get("tts_rate"), default_tts_rate_step()),
+        "tts_volume": clamp_int(
+            data.get("tts_volume"), 0, 100, default_tts_volume_percent()
         ),
         **{key: value for key, value in data.items()
            if key in {"speak", "barge_in", "wake"} and type(value) is bool},
@@ -632,10 +661,12 @@ class AssistantCore(AnimationClock, QPushButton):
         rows = {
             "idle": idle_row,
             "waving": 3,
+            "speaking": 4,
             "failed": 5,
             "waiting": 6,
             "running": 7,
             "review": 8,
+            "listening": 8,
         }
         row = max(0, min(len(self.pet_rows) - 1, rows.get(state, rows["idle"])))
         if not self.pet_rows[row]:
@@ -988,6 +1019,7 @@ class VoiceWindow(QMainWindow):
         self.asr_thread: threading.Thread | None = None
         self.chat_thread: threading.Thread | None = None
         self.agent_thread: threading.Thread | None = None
+        self.preview_thread: threading.Thread | None = None
         self.barge_thread: threading.Thread | None = None
         self.barge_session: BargeSession | None = None
         self.asr_preload_thread: threading.Thread | None = None
@@ -1180,9 +1212,9 @@ class VoiceWindow(QMainWindow):
     def _build_settings_panel(self) -> QFrame:
         panel = QFrame()
         panel.setObjectName("settingsPanel")
-        panel.setFixedWidth(286)
+        panel.setFixedWidth(304)
         layout = QVBoxLayout(panel)
-        layout.setContentsMargins(20, 22, 20, 20)
+        layout.setContentsMargins(20, 22, 10, 20)
         layout.setSpacing(11)
         heading = QLabel("设置")
         heading.setObjectName("panelHeading")
@@ -1196,14 +1228,83 @@ class VoiceWindow(QMainWindow):
         title_row.addStretch()
         title_row.addWidget(close_button)
         layout.addLayout(title_row)
-        layout.addSpacing(8)
-        layout.addWidget(section_label("麦克风"))
+
+        scroll = QScrollArea()
+        scroll.setObjectName("settingsScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scroll.setFrameShape(QFrame.NoFrame)
+        content = QWidget()
+        content.setObjectName("settingsContent")
+        settings = QVBoxLayout(content)
+        settings.setContentsMargins(0, 8, 8, 0)
+        settings.setSpacing(11)
+        scroll.setWidget(content)
+        layout.addWidget(scroll, 1)
+
+        settings.addWidget(section_label("麦克风"))
         self.device_combo = QComboBox()
         self.device_combo.setObjectName("deviceCombo")
-        layout.addWidget(self.device_combo)
+        settings.addWidget(self.device_combo)
         self.device_combo.setToolTip("切换后使用新麦克风，已加载的语音模型会保留")
-        layout.addSpacing(10)
-        layout.addWidget(section_label("桌面宠物"))
+        settings.addSpacing(10)
+
+        settings.addWidget(section_label("朗读声音"))
+        self.tts_voice_combo = QComboBox()
+        self.tts_voice_combo.setObjectName("ttsVoiceCombo")
+        for voice in EDGE_VOICES:
+            self.tts_voice_combo.addItem(voice.label, voice.id)
+        selected_voice = self.tts_voice_combo.findData(
+            self.ui_preferences.get("tts_voice", default_tts_voice())
+        )
+        self.tts_voice_combo.setCurrentIndex(max(0, selected_voice))
+        settings.addWidget(self.tts_voice_combo)
+        self.tts_voice_description = QLabel()
+        self.tts_voice_description.setObjectName("settingHint")
+        self.tts_voice_description.setWordWrap(True)
+        settings.addWidget(self.tts_voice_description)
+
+        rate_row = QHBoxLayout()
+        rate_label = QLabel("语速")
+        rate_label.setObjectName("settingName")
+        self.tts_rate_value = QLabel()
+        self.tts_rate_value.setObjectName("settingValue")
+        rate_row.addWidget(rate_label)
+        rate_row.addStretch()
+        rate_row.addWidget(self.tts_rate_value)
+        settings.addLayout(rate_row)
+        self.tts_rate_slider = QSlider(Qt.Horizontal)
+        self.tts_rate_slider.setObjectName("settingSlider")
+        self.tts_rate_slider.setRange(-5, 5)
+        self.tts_rate_slider.setValue(
+            self.ui_preferences.get("tts_rate", default_tts_rate_step())
+        )
+        settings.addWidget(self.tts_rate_slider)
+
+        volume_row = QHBoxLayout()
+        volume_label = QLabel("音量")
+        volume_label.setObjectName("settingName")
+        self.tts_volume_value = QLabel()
+        self.tts_volume_value.setObjectName("settingValue")
+        volume_row.addWidget(volume_label)
+        volume_row.addStretch()
+        volume_row.addWidget(self.tts_volume_value)
+        settings.addLayout(volume_row)
+        self.tts_volume_slider = QSlider(Qt.Horizontal)
+        self.tts_volume_slider.setObjectName("settingSlider")
+        self.tts_volume_slider.setRange(0, 100)
+        self.tts_volume_slider.setSingleStep(5)
+        self.tts_volume_slider.setValue(
+            self.ui_preferences.get("tts_volume", default_tts_volume_percent())
+        )
+        settings.addWidget(self.tts_volume_slider)
+        self.voice_preview_button = QPushButton("试听当前音色")
+        self.voice_preview_button.setObjectName("voicePreviewButton")
+        settings.addWidget(self.voice_preview_button)
+        self._refresh_voice_settings()
+
+        settings.addSpacing(10)
+        settings.addWidget(section_label("桌面宠物"))
 
         size_row = QHBoxLayout()
         size_label = QLabel("大小")
@@ -1213,7 +1314,7 @@ class VoiceWindow(QMainWindow):
         size_row.addWidget(size_label)
         size_row.addStretch()
         size_row.addWidget(self.pet_size_value)
-        layout.addLayout(size_row)
+        settings.addLayout(size_row)
         self.pet_size_slider = QSlider(Qt.Horizontal)
         self.pet_size_slider.setObjectName("settingSlider")
         self.pet_size_slider.setRange(72, 220)
@@ -1221,7 +1322,7 @@ class VoiceWindow(QMainWindow):
         self.pet_size_slider.setPageStep(16)
         self.pet_size_slider.setValue(self.compact_pet_size)
         self.pet_size_slider.setToolTip("调整桌面常驻宠物的显示大小")
-        layout.addWidget(self.pet_size_slider)
+        settings.addWidget(self.pet_size_slider)
 
         fps_row = QHBoxLayout()
         fps_label = QLabel("动画刷新率")
@@ -1231,7 +1332,7 @@ class VoiceWindow(QMainWindow):
         fps_row.addWidget(fps_label)
         fps_row.addStretch()
         fps_row.addWidget(self.animation_fps_value)
-        layout.addLayout(fps_row)
+        settings.addLayout(fps_row)
         self.animation_fps_slider = QSlider(Qt.Horizontal)
         self.animation_fps_slider.setObjectName("settingSlider")
         self.animation_fps_slider.setRange(10, 60)
@@ -1239,27 +1340,27 @@ class VoiceWindow(QMainWindow):
         self.animation_fps_slider.setPageStep(5)
         self.animation_fps_slider.setValue(self.ui_animation_fps)
         self.animation_fps_slider.setToolTip("数值越高越流畅，也会增加少量 CPU 占用")
-        layout.addWidget(self.animation_fps_slider)
+        settings.addWidget(self.animation_fps_slider)
         performance_hint = QLabel("推荐 22–30 FPS；高刷新率会增加少量 CPU 占用。")
         performance_hint.setObjectName("settingHint")
         performance_hint.setWordWrap(True)
-        layout.addWidget(performance_hint)
-        layout.addSpacing(7)
+        settings.addWidget(performance_hint)
+        settings.addSpacing(7)
         self.tts_check = ToggleSwitch("朗读 AI 回复")
         self.tts_check.setChecked(self.ui_preferences.get("speak", True))
-        layout.addWidget(self.tts_check)
+        settings.addWidget(self.tts_check)
         self.barge_check = ToggleSwitch("允许说话打断朗读")
         self.barge_check.setChecked(self.ui_preferences.get("barge_in", bool(config.TTS_BARGE_IN_ENABLED)))
         self.barge_check.setToolTip("外放可能被扬声器回声触发，建议佩戴耳机")
-        layout.addWidget(self.barge_check)
+        settings.addWidget(self.barge_check)
         self.wake_check = ToggleSwitch("启用“悟空”语音唤醒")
         self.wake_check.setChecked(self.wake_enabled)
-        layout.addWidget(self.wake_check)
-        layout.addStretch()
+        settings.addWidget(self.wake_check)
+        settings.addStretch()
         model_info = QLabel("唤醒词识别仅在本机运行。关闭后，麦克风只会在你主动开始语音时使用。")
         model_info.setObjectName("technicalInfo")
         model_info.setWordWrap(True)
-        layout.addWidget(model_info)
+        settings.addWidget(model_info)
         return panel
 
     def _connect_signals(self) -> None:
@@ -1272,6 +1373,10 @@ class VoiceWindow(QMainWindow):
         self.input.textChanged.connect(self._sync_send_button)
         self.model_combo.currentIndexChanged.connect(self._change_model)
         self.device_combo.currentIndexChanged.connect(self._device_changed)
+        self.tts_voice_combo.currentIndexChanged.connect(self._voice_settings_changed)
+        self.tts_rate_slider.valueChanged.connect(self._voice_settings_changed)
+        self.tts_volume_slider.valueChanged.connect(self._voice_settings_changed)
+        self.voice_preview_button.clicked.connect(self._preview_voice)
         self.wake_check.toggled.connect(self._wake_setting_changed)
         self.barge_check.toggled.connect(self._barge_setting_changed)
         for control in (self.tts_check, self.barge_check, self.wake_check):
@@ -1320,6 +1425,44 @@ class VoiceWindow(QMainWindow):
         ):
             animated.set_animation_fps(fps)
 
+    def _speech_options(self) -> tuple[str, str, float]:
+        return (
+            normalize_voice(self.tts_voice_combo.currentData()),
+            edge_rate(self.tts_rate_slider.value()),
+            self.tts_volume_slider.value() / 100,
+        )
+
+    def _refresh_voice_settings(self) -> None:
+        voice_id = normalize_voice(self.tts_voice_combo.currentData())
+        voice = next(item for item in EDGE_VOICES if item.id == voice_id)
+        self.tts_voice_description.setText(voice.description)
+        self.tts_rate_value.setText(edge_rate(self.tts_rate_slider.value()))
+        self.tts_volume_value.setText(f"{self.tts_volume_slider.value()}%")
+
+    def _voice_settings_changed(self, _value=None) -> None:  # noqa: ANN001
+        self._refresh_voice_settings()
+        if self.speaker:
+            voice, rate, volume = self._speech_options()
+            self.speaker.configure(voice=voice, rate=rate, volume=volume)
+        self.ui_settings_save_timer.start(250)
+
+    def _preview_voice(self) -> None:
+        if not self.speaker or not self._begin_worker("tts-preview", RuntimeState.SPEAKING):
+            return
+
+        def work() -> None:
+            try:
+                self.speaker.speak("你好，我是悟空。这个声音听起来怎么样？")
+            except Exception as exc:
+                self.signals.error.emit(f"音色试听失败：{exc}")
+            finally:
+                self.signals.worker_finished.emit("tts-preview")
+
+        self.preview_thread = threading.Thread(
+            target=work, name="gui-tts-preview", daemon=True
+        )
+        self.preview_thread.start()
+
     def _save_ui_preferences(self) -> None:
         data = {
             "compact_pet_size": self.compact_pet_size,
@@ -1329,6 +1472,9 @@ class VoiceWindow(QMainWindow):
             "wake": self.wake_check.isChecked(),
             "model": self.model_combo.currentData(),
             "device_name": self.device_combo.currentText(),
+            "tts_voice": normalize_voice(self.tts_voice_combo.currentData()),
+            "tts_rate": self.tts_rate_slider.value(),
+            "tts_volume": self.tts_volume_slider.value(),
         }
         path = ui_settings_path()
         temporary_path = path.with_suffix(path.suffix + ".tmp")
@@ -1344,7 +1490,13 @@ class VoiceWindow(QMainWindow):
     def _initialize_services(self) -> None:
         try:
             self.chat = ChatSession(model=self.model_combo.currentData())
-            self.speaker = EdgeSpeaker(on_segment_start=self.signals.tts_segment.emit)
+            voice, rate, volume = self._speech_options()
+            self.speaker = EdgeSpeaker(
+                on_segment_start=self.signals.tts_segment.emit,
+                voice=voice,
+                rate=rate,
+                volume=volume,
+            )
             self._set_runtime_state(RuntimeState.READY)
         except Exception as exc:
             self._show_error(str(exc))
@@ -2073,6 +2225,27 @@ class VoiceWindow(QMainWindow):
         }
         text, tone, overlay = labels[state]
         self._set_status(text, tone)
+        pet_state = {
+            RuntimeState.BOOTING: "running",
+            RuntimeState.STANDBY: "idle",
+            RuntimeState.READY: "idle",
+            RuntimeState.LISTENING: "listening",
+            RuntimeState.PROCESSING: "waiting",
+            RuntimeState.EXECUTING: "running",
+            RuntimeState.SPEAKING: "speaking",
+            RuntimeState.STOPPING: "waiting",
+            RuntimeState.ERROR: "failed",
+        }[state]
+        for core in (self.compact_window.core, self.voice_overlay.core):
+            core.set_pet_state(pet_state)
+        voice_controls_enabled = not self.runtime.busy
+        for control in (
+            self.tts_voice_combo,
+            self.tts_rate_slider,
+            self.tts_volume_slider,
+            self.voice_preview_button,
+        ):
+            control.setEnabled(voice_controls_enabled)
         if self.current_mode == "voice":
             self.voice_overlay.state_label.setText(overlay)
 
@@ -2302,6 +2475,7 @@ QLabel#bubbleRole { color: #6d85c7; font-size: 10px; font-weight: 600; }
 QLabel#bubbleText { color: #e9ebf0; font-size: 14px; }
 QLabel#bubbleMeta { color: #606977; font-size: 9px; }
 QFrame#settingsPanel { background: #0d1118; border-left: 1px solid #252b35; border-bottom-right-radius: 14px; }
+QWidget#settingsContent { background: transparent; }
 QLabel#panelHeading { color: #f3f4f7; font-size: 16px; font-weight: 600; }
 QLabel#settingHint, QLabel#technicalInfo { color: #687181; font-size: 10px; }
 QLabel#settingName { color: #c3c9d4; font-size: 12px; }
@@ -2311,6 +2485,10 @@ QSlider#settingSlider::groove:horizontal { height: 4px; background: #282f3a; bor
 QSlider#settingSlider::sub-page:horizontal { background: #4f78e8; border-radius: 2px; }
 QSlider#settingSlider::handle:horizontal { width: 14px; margin: -5px 0; background: #edf4ff; border: 2px solid #5e87f3; border-radius: 7px; }
 QSlider#settingSlider::handle:horizontal:hover { background: #ffffff; border-color: #7da2ff; }
+QPushButton#voicePreviewButton { color: #dbe7ff; background: #18243a; border: 1px solid #31507d; border-radius: 7px; padding: 8px 10px; }
+QPushButton#voicePreviewButton:hover { color: white; background: #203252; border-color: #4d73ad; }
+QPushButton#voicePreviewButton:pressed { background: #142039; }
+QPushButton#voicePreviewButton:disabled { color: #697181; background: #151920; border-color: #252b35; }
 QCheckBox { color: #c0c5cf; spacing: 8px; }
 QCheckBox::indicator { width: 15px; height: 15px; }
 QScrollBar:vertical { width: 7px; background: transparent; }

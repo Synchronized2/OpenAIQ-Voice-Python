@@ -26,6 +26,10 @@ class BargeInTests(unittest.TestCase):
                 pass
 
             @staticmethod
+            def set_volume(_volume):
+                pass
+
+            @staticmethod
             def play():
                 started.set()
 

@@ -14,6 +14,7 @@ import config  # noqa: E402
 from agent import LocalAction  # noqa: E402
 from gui import CompactOrbWindow, VoiceWindow  # noqa: E402
 from runtime_state import RuntimeState  # noqa: E402
+from voices import EDGE_VOICES, normalize_voice  # noqa: E402
 
 
 class GuiSmokeTests(unittest.TestCase):
@@ -40,6 +41,20 @@ class GuiSmokeTests(unittest.TestCase):
                 self.assertEqual(window.windowTitle(), "OpenAIQ Voice")
                 self.assertEqual(window.model_combo.count(), len(config.CHAT_MODEL_OPTIONS))
                 self.assertEqual(window.model_combo.currentText(), config.CHAT_MODEL)
+                self.assertEqual(window.tts_voice_combo.count(), len(EDGE_VOICES))
+                self.assertEqual(
+                    window.tts_voice_combo.currentData(), normalize_voice(config.TTS_VOICE)
+                )
+                for state, row in (
+                    (RuntimeState.LISTENING, 8),
+                    (RuntimeState.PROCESSING, 6),
+                    (RuntimeState.EXECUTING, 7),
+                    (RuntimeState.SPEAKING, 4),
+                    (RuntimeState.ERROR, 5),
+                ):
+                    window._set_runtime_state(state)
+                    self.assertIs(window.compact_window.core.pet_frames, window.compact_window.core.pet_rows[row])
+                    self.assertIs(window.voice_overlay.core.pet_frames, window.voice_overlay.core.pet_rows[row])
                 window._show_compact_layer()
                 self.app.processEvents()
                 self.assertTrue(window.compact_window.isVisible())
@@ -90,9 +105,15 @@ class GuiSmokeTests(unittest.TestCase):
                 self.app.processEvents()
                 self.assertTrue(window.voice_overlay.isVisible())
                 self.assertTrue(window.voice_overlay.waveform.isVisible())
+                window._set_runtime_state(RuntimeState.SPEAKING)
                 window._show_tts_segment("第一段正在朗读")
                 window._show_tts_segment("第二段正在朗读")
                 self.assertEqual(window.voice_overlay.answer_label.text(), "第二段正在朗读")
+                for core in (
+                    window.compact_window.core,
+                    window.voice_overlay.core,
+                ):
+                    self.assertIs(core.pet_frames, core.pet_rows[4])
                 window._show_barge_state("已打断", "请继续说完…")
                 self.assertEqual(window.voice_overlay.answer_label.text(), "")
                 window.runtime.finish("chat")
@@ -107,6 +128,18 @@ class GuiSmokeTests(unittest.TestCase):
                 window._toggle_settings()
                 self.app.processEvents()
                 self.assertTrue(window.settings_panel.isVisible())
+                speaker = MagicMock()
+                window.speaker = speaker
+                window.tts_voice_combo.setCurrentIndex(2)
+                window.tts_rate_slider.setValue(2)
+                window.tts_volume_slider.setValue(65)
+                speaker.configure.assert_called_with(
+                    voice="zh-CN-YunxiNeural", rate="+12%", volume=0.65
+                )
+                window._preview_voice()
+                window.preview_thread.join(timeout=2)
+                self.app.processEvents()
+                speaker.speak.assert_called_once()
                 original_size = window.compact_pet_size
                 original_fps = window.ui_animation_fps
                 window.pet_size_slider.setValue(176)

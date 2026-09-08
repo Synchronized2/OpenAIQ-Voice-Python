@@ -15,6 +15,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np
 import httpx
+import config
 from openai import AsyncOpenAI
 from PySide6.QtWidgets import QApplication
 from PySide6.QtTest import QTest
@@ -26,6 +27,7 @@ from gui import AiCoreWidget, AssistantCore, VoiceWindow, WaveformWidget, load_u
 from runtime_state import RuntimeMachine, RuntimeState
 from tts import EdgeSpeaker
 from voice_session import BargeSession
+from voices import normalize_voice
 
 
 class CancellationTests(unittest.TestCase):
@@ -327,6 +329,9 @@ class GuiReliabilityTests(unittest.TestCase):
                 first.wake_check.setChecked(True)
                 first.model_combo.setCurrentIndex(first.model_combo.count() - 1)
                 first.device_combo.setCurrentIndex(1)
+                first.tts_voice_combo.setCurrentIndex(2)
+                first.tts_rate_slider.setValue(2)
+                first.tts_volume_slider.setValue(65)
                 first._save_ui_preferences()
                 self.assertTrue(settings.is_file())
                 second = VoiceWindow()
@@ -339,6 +344,9 @@ class GuiReliabilityTests(unittest.TestCase):
                 self.assertTrue(second.wake_check.isChecked())
                 self.assertEqual(second.model_combo.currentData(), first.model_combo.currentData())
                 self.assertEqual(second.device_combo.currentData(), 0)
+                self.assertEqual(second.tts_voice_combo.currentData(), "zh-CN-YunxiNeural")
+                self.assertEqual(second.tts_rate_slider.value(), 2)
+                self.assertEqual(second.tts_volume_slider.value(), 65)
                 self.assertIsNone(second.asr)
             finally:
                 for window in windows:
@@ -354,6 +362,7 @@ class GuiReliabilityTests(unittest.TestCase):
             with self.subTest(content=content), patch.object(Path, "read_text", return_value=content):
                 preferences = load_ui_preferences()
                 self.assertEqual(preferences["compact_pet_size"], 138)
+                self.assertEqual(preferences["tts_voice"], normalize_voice(config.TTS_VOICE))
 
     def test_microphone_change_does_not_reload_models(self):
         model = object()
