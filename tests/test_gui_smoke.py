@@ -76,6 +76,7 @@ class GuiSmokeTests(unittest.TestCase):
                 self.app.processEvents()
                 self.assertTrue(window.send_button.isVisible())
                 self.assertTrue(window.listen_compact.isVisible())
+                self.assertTrue(window.live2d_view.isVisible())
                 self.assertFalse(window.send_button.isEnabled())
                 self.assertFalse(window.stop_button.isEnabled())
                 window.input.setPlainText("测试")

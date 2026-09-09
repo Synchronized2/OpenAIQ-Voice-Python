@@ -69,6 +69,7 @@ class Live2DView(QFrame):
         self.setObjectName("live2dView")
         self._server: _AssetServer | None = None
         self._model: Live2DModel | None = None
+        self._state = "idle"
         self._web: QWebEngineView | None = None
         self._fallback = QLabel("Live2D 预览需要 PySide6 WebEngine\n请运行 setup.ps1 安装完整依赖")
         self._fallback.setObjectName("live2dFallback")
@@ -78,6 +79,9 @@ class Live2DView(QFrame):
         if WEBENGINE_AVAILABLE:
             self._web = QWebEngineView(self)
             self._web.setContextMenuPolicy(Qt.NoContextMenu)
+            self._web.loadFinished.connect(
+                lambda ok: self.set_state(self._state) if ok else None
+            )
             layout.addWidget(self._web)
         else:
             layout.addWidget(self._fallback)
@@ -103,6 +107,7 @@ class Live2DView(QFrame):
         self._web.setUrl(QUrl(model_url))
 
     def set_state(self, state: str) -> None:
+        self._state = state
         if not self._web:
             return
         script = f"window.setState && window.setState({json.dumps(state)});"
