@@ -48,7 +48,11 @@
       addEventListener('pointerleave', () => { gazeX = gazeY = 0; });
       (async () => {
         try {
-          if (!window.PIXI || !window.PIXI.live2d || !modelUrl) throw new Error('渲染组件或模型路径不可用');
+          if (location.protocol === 'file:') {
+            throw new Error('请运行 run-ui.ps1 启动 Voice，不要直接双击此 HTML 文件');
+          }
+          if (!window.PIXI || !window.PIXI.live2d) throw new Error('渲染组件不可用，请重新运行 setup.ps1');
+          if (!modelUrl) throw new Error('缺少模型路径，请从 Voice 设置中选择 2D 形象');
           app = new PIXI.Application({ view: document.getElementById('stage'), backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: Math.min(devicePixelRatio, 2) });
           const { Live2DModel, config } = window.PIXI.live2d;
           config.sound = false;

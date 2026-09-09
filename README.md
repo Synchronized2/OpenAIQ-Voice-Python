@@ -183,6 +183,8 @@ FireRedVAD 检测到第一处语音端点后便立即提交，不会把较长静
 
 主窗口欢迎页会显示 `assets/live2d/hiyori_pro_zh` 中的 Hiyori / 日和模型，监听、思考、执行、朗读和错误状态会驱动对应动作。桌面常驻小窗继续使用轻量的悟空精灵，以降低常驻渲染开销。
 
+不要直接双击 `assets/live2d/live2d-viewer.html`，它是 Voice 内部使用的渲染页面，不是独立网页入口；请运行 `run-ui.ps1`，由程序提供本地资源服务并传入当前模型路径。
+
 设置面板的“2D 形象”区域支持选择模型目录并递归扫描。将包含 `.model3.json`、`.model.json` 或兼容 `index.json` 的完整模型目录复制到任意位置，点击“选择目录”后扫描即可；程序只列出核心文件和纹理引用完整的模型。模型选择会保存到 `ui-settings.json`，下次启动自动恢复。
 
 Live2D 渲染使用 PySide6 WebEngine，`setup.ps1` 会通过 `requirements.txt` 安装 `PySide6-Addons`。若运行环境未安装 WebEngine，界面仍可启动，但会显示安装提示而不会影响语音功能。
