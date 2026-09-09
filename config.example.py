@@ -56,6 +56,7 @@ PET_FRAME_COUNT = 8
 COMPACT_PET_SIZE = 138
 UI_ANIMATION_FPS = 22
 PET_FRAME_INTERVAL_MS = 150
+LIVE2D_MODEL_DIR = str(Path(__file__).resolve().parent / "assets" / "live2d")
 WAKE_WORD_ENABLED = True
 WAKE_WORDS = ("孙悟空", "猴哥", "悟空", "大圣", "齐天大圣")
 WAKE_WORD_ALIASES = ("孙悟", "五空", "吾空", "武空", "后哥", "大胜", "齐天大胜")

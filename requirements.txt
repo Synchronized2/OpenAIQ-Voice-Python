@@ -11,6 +11,7 @@ soundfile==0.13.1
 kaldiio==2.18.1
 kaldi-native-fbank==1.22.3
 PySide6-Essentials>=6.8.0,<7
+PySide6-Addons>=6.8.0,<7
 pycaw>=20240210
 screen-brightness-control>=0.24.2
 pypinyin>=0.55.0

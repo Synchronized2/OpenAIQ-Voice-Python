@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <style>
+    html, body, canvas { width: 100%; height: 100%; margin: 0; overflow: hidden; background: transparent; }
+    #error { position: fixed; inset: 0; display: grid; place-items: center; color: #9aa8bc; font: 13px 'Segoe UI', sans-serif; text-align: center; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas><div id="error" hidden></div>
+  <script src="runtime/pixi.min.js"></script>
+  <script src="runtime/live2dcubismcore.min.js"></script>
+  <script src="runtime/cubism4.min.js"></script>
+  <script>
+    (() => {
+      const error = document.getElementById('error');
+      const query = new URLSearchParams(location.search);
+      const modelUrl = query.get('model');
+      let app, model, lastState = 'idle', gazeX = 0, gazeY = 0;
+      const stateGroups = {
+        idle: ['Idle', 'idle'], listening: ['Flick', 'Tap', 'Idle', 'idle'],
+        thinking: ['FlickUp', 'Flick', 'Idle', 'idle'], executing: ['Tap@Body', 'Tap', 'Idle', 'idle'],
+        speaking: ['Tap', 'Flick', 'Idle', 'idle'], error: ['FlickDown', 'Flick', 'Idle', 'idle']
+      };
+      const showError = message => { error.hidden = false; error.textContent = 'Live2D 加载失败\n' + message; };
+      const fit = () => {
+        if (!app || !model) return;
+        const width = innerWidth, height = innerHeight;
+        app.renderer.resize(width, height);
+        const internal = model.internalModel;
+        const scale = Math.min(width / (internal.originalWidth * 0.72), height / (internal.originalHeight * 0.76));
+        model.scale.set(scale / internal.localTransform.a, scale / internal.localTransform.d);
+        model.anchor.set(0.5, 0);
+        model.position.set(width / 2 - internal.localTransform.tx * model.scale.x, height * 0.02 - internal.localTransform.ty * model.scale.y);
+      };
+      const playState = state => {
+        if (!model || state === lastState) return;
+        lastState = state;
+        const definitions = model.internalModel.motionManager.definitions || {};
+        const group = (stateGroups[state] || stateGroups.idle).find(name => definitions[name]?.length);
+        if (group) model.motion(group, undefined, 2).catch(() => {});
+      };
+      window.setState = playState;
+      addEventListener('resize', fit);
+      addEventListener('pointermove', event => { gazeX = event.clientX / innerWidth * 2 - 1; gazeY = event.clientY / innerHeight * 2 - 1; });
+      addEventListener('pointerleave', () => { gazeX = gazeY = 0; });
+      (async () => {
+        try {
+          if (!window.PIXI || !window.PIXI.live2d || !modelUrl) throw new Error('渲染组件或模型路径不可用');
+          app = new PIXI.Application({ view: document.getElementById('stage'), backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: Math.min(devicePixelRatio, 2) });
+          const { Live2DModel, config } = window.PIXI.live2d;
+          config.sound = false;
+          model = await Live2DModel.from(modelUrl, { autoInteract: false, autoUpdate: true });
+          app.stage.addChild(model); fit(); error.hidden = true;
+          model.internalModel.on('beforeModelUpdate', () => {
+            const core = model.internalModel.coreModel;
+            const set = (id, value) => { try { core.setParameterValueById(id, value); } catch (_) {} };
+            set('ParamAngleX', gazeX * 8); set('ParamAngleY', -gazeY * 5); set('ParamEyeBallX', gazeX * 0.3); set('ParamEyeBallY', -gazeY * 0.2);
+          });
+          playState('idle');
+        } catch (failure) { showError(failure?.message || String(failure)); }
+      })();
+    })();
+  </script>
+</body>
+</html>

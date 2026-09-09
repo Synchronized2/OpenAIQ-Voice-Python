@@ -31,6 +31,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
     QComboBox,
+    QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
@@ -65,6 +66,8 @@ from voices import (
     normalize_voice,
 )
 from wake import WakeWordDetector
+from live2d_models import Live2DModel, default_model_root, model_by_id, scan_live2d_models
+from live2d_viewer import Live2DView
 
 
 APP_USER_MODEL_ID = "OpenAIQ.Voice"
@@ -100,6 +103,11 @@ def default_tts_rate_step() -> int:
 
 def default_tts_volume_percent() -> int:
     return round(clamp_volume(getattr(config, "TTS_VOLUME", 1.0)) * 100)
+
+
+def default_live2d_root() -> Path:
+    configured = getattr(config, "LIVE2D_MODEL_DIR", "")
+    return Path(configured).expanduser() if configured else default_model_root()
 
 
 def animation_interval_ms(fps: int) -> int:
@@ -138,6 +146,8 @@ def load_ui_preferences() -> dict:
            if key in {"speak", "barge_in", "wake"} and type(value) is bool},
         **{key: value for key, value in data.items()
            if key in {"model", "device_name"} and isinstance(value, str)},
+        **{key: value for key, value in data.items()
+           if key in {"live2d_root", "live2d_model"} and isinstance(value, str)},
     }
 
 
@@ -1055,6 +1065,16 @@ class VoiceWindow(QMainWindow):
         self.wake_enabled = self.ui_preferences.get("wake", self.wake_enabled)
         self.compact_pet_size = self.ui_preferences["compact_pet_size"]
         self.ui_animation_fps = self.ui_preferences["ui_animation_fps"]
+        configured_live2d_root = self.ui_preferences.get("live2d_root")
+        self.live2d_root = Path(configured_live2d_root).expanduser() if configured_live2d_root else default_live2d_root()
+        self.live2d_models = scan_live2d_models(self.live2d_root)
+        preferred_live2d = self.ui_preferences.get("live2d_model")
+        self.live2d_model = model_by_id(self.live2d_models, preferred_live2d)
+        if self.live2d_model is None:
+            self.live2d_model = next(
+                (model for model in self.live2d_models if "hiyori" in model.name.lower()),
+                self.live2d_models[0] if self.live2d_models else None,
+            )
         self.ui_settings_save_timer = QTimer(self)
         self.ui_settings_save_timer.setSingleShot(True)
         self.ui_settings_save_timer.timeout.connect(self._save_ui_preferences)
@@ -1136,7 +1156,11 @@ class VoiceWindow(QMainWindow):
         layout.setSpacing(4)
         layout.addStretch(2)
         self.ai_core = AiCoreWidget()
-        layout.addWidget(self.ai_core, 0, Qt.AlignCenter)
+        self.live2d_view = Live2DView()
+        self.live2d_view.setMinimumSize(300, 280)
+        self.live2d_view.set_model(self.live2d_model)
+        layout.addWidget(self.live2d_view, 1)
+        self.ai_core.hide()
         layout.addSpacing(18)
         greeting = QLabel("你好，我是你的 AI 助手")
         greeting.setObjectName("greeting")
@@ -1248,6 +1272,24 @@ class VoiceWindow(QMainWindow):
         settings.addWidget(self.device_combo)
         self.device_combo.setToolTip("切换后使用新麦克风，已加载的语音模型会保留")
         settings.addSpacing(10)
+
+        settings.addWidget(section_label("2D 形象"))
+        self.live2d_model_combo = QComboBox()
+        self.live2d_model_combo.setObjectName("live2dModelCombo")
+        settings.addWidget(self.live2d_model_combo)
+        self.live2d_model_hint = QLabel()
+        self.live2d_model_hint.setObjectName("settingHint")
+        self.live2d_model_hint.setWordWrap(True)
+        settings.addWidget(self.live2d_model_hint)
+        live2d_actions = QHBoxLayout()
+        self.live2d_scan_button = QPushButton("扫描模型目录")
+        self.live2d_scan_button.setObjectName("live2dScanButton")
+        self.live2d_choose_button = QPushButton("选择目录")
+        self.live2d_choose_button.setObjectName("live2dChooseButton")
+        live2d_actions.addWidget(self.live2d_scan_button)
+        live2d_actions.addWidget(self.live2d_choose_button)
+        settings.addLayout(live2d_actions)
+        self._refresh_live2d_controls()
 
         settings.addWidget(section_label("朗读声音"))
         self.tts_voice_combo = QComboBox()
@@ -1373,6 +1415,9 @@ class VoiceWindow(QMainWindow):
         self.input.textChanged.connect(self._sync_send_button)
         self.model_combo.currentIndexChanged.connect(self._change_model)
         self.device_combo.currentIndexChanged.connect(self._device_changed)
+        self.live2d_model_combo.currentIndexChanged.connect(self._live2d_model_changed)
+        self.live2d_scan_button.clicked.connect(self._scan_live2d_directory)
+        self.live2d_choose_button.clicked.connect(self._choose_live2d_directory)
         self.tts_voice_combo.currentIndexChanged.connect(self._voice_settings_changed)
         self.tts_rate_slider.valueChanged.connect(self._voice_settings_changed)
         self.tts_volume_slider.valueChanged.connect(self._voice_settings_changed)
@@ -1383,6 +1428,7 @@ class VoiceWindow(QMainWindow):
             control.toggled.connect(lambda _value: self.ui_settings_save_timer.start(250))
         self.model_combo.currentIndexChanged.connect(lambda _value: self.ui_settings_save_timer.start(250))
         self.device_combo.currentIndexChanged.connect(lambda _value: self.ui_settings_save_timer.start(250))
+        self.live2d_model_combo.currentIndexChanged.connect(lambda _value: self.ui_settings_save_timer.start(250))
         self.pet_size_slider.valueChanged.connect(self._pet_size_changed)
         self.animation_fps_slider.valueChanged.connect(self._animation_fps_changed)
         self.signals.status.connect(self._set_status)
@@ -1403,6 +1449,56 @@ class VoiceWindow(QMainWindow):
 
     def _sync_send_button(self) -> None:
         self.send_button.setEnabled(bool(self.input.toPlainText().strip()))
+
+    def _refresh_live2d_controls(self) -> None:
+        self.live2d_model_combo.blockSignals(True)
+        try:
+            self.live2d_model_combo.clear()
+            for model in self.live2d_models:
+                self.live2d_model_combo.addItem(model.name, model.id)
+            index = self.live2d_model_combo.findData(
+                self.live2d_model.id if self.live2d_model else None
+            )
+            if index >= 0:
+                self.live2d_model_combo.setCurrentIndex(index)
+        finally:
+            self.live2d_model_combo.blockSignals(False)
+        if self.live2d_model:
+            self.live2d_model_hint.setText(
+                f"{self.live2d_model.relative_manifest}\n目录：{self.live2d_root}"
+            )
+        elif self.live2d_models:
+            self.live2d_model_hint.setText("请选择一个模型")
+        else:
+            self.live2d_model_hint.setText(
+                "未找到可用模型。把 Live2D 模型目录放入指定位置后点击扫描。"
+            )
+
+    def _live2d_model_changed(self, _index: int) -> None:
+        selected = model_by_id(self.live2d_models, self.live2d_model_combo.currentData())
+        self.live2d_model = selected
+        self.live2d_view.set_model(selected)
+        self._refresh_live2d_controls()
+        self.ui_settings_save_timer.start(250)
+
+    def _scan_live2d_directory(self) -> None:
+        self.live2d_models = scan_live2d_models(self.live2d_root)
+        preferred = self.live2d_model.id if self.live2d_model else self.ui_preferences.get("live2d_model")
+        self.live2d_model = model_by_id(self.live2d_models, preferred)
+        if self.live2d_model is None and self.live2d_models:
+            self.live2d_model = self.live2d_models[0]
+        self.live2d_view.set_model(self.live2d_model)
+        self._refresh_live2d_controls()
+        self.ui_settings_save_timer.start(250)
+
+    def _choose_live2d_directory(self) -> None:
+        selected = QFileDialog.getExistingDirectory(
+            self, "选择 Live2D 模型目录", str(self.live2d_root)
+        )
+        if not selected:
+            return
+        self.live2d_root = Path(selected).expanduser().resolve()
+        self._scan_live2d_directory()
 
     def _pet_size_changed(self, value: int) -> None:
         self.compact_pet_size = clamp_int(value, 72, 220, default_pet_size())
@@ -1475,6 +1571,8 @@ class VoiceWindow(QMainWindow):
             "tts_voice": normalize_voice(self.tts_voice_combo.currentData()),
             "tts_rate": self.tts_rate_slider.value(),
             "tts_volume": self.tts_volume_slider.value(),
+            "live2d_root": str(self.live2d_root),
+            "live2d_model": self.live2d_model.id if self.live2d_model else "",
         }
         path = ui_settings_path()
         temporary_path = path.with_suffix(path.suffix + ".tmp")
@@ -2238,6 +2336,19 @@ class VoiceWindow(QMainWindow):
         }[state]
         for core in (self.compact_window.core, self.voice_overlay.core):
             core.set_pet_state(pet_state)
+        live2d_state = {
+            RuntimeState.BOOTING: "thinking",
+            RuntimeState.STANDBY: "idle",
+            RuntimeState.READY: "idle",
+            RuntimeState.LISTENING: "listening",
+            RuntimeState.PROCESSING: "thinking",
+            RuntimeState.EXECUTING: "executing",
+            RuntimeState.SPEAKING: "speaking",
+            RuntimeState.STOPPING: "thinking",
+            RuntimeState.ERROR: "error",
+        }[state]
+        if hasattr(self, "live2d_view"):
+            self.live2d_view.set_state(live2d_state)
         voice_controls_enabled = not self.runtime.busy
         for control in (
             self.tts_voice_combo,
@@ -2322,6 +2433,7 @@ class VoiceWindow(QMainWindow):
             self.speaker.close()
         self.voice_overlay.hide()
         self.compact_window.hide()
+        self.live2d_view.close()
         self.tray.hide()
         QApplication.quit()
 
