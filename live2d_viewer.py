@@ -29,8 +29,9 @@ class _AssetHandler(SimpleHTTPRequestHandler):
 
     def translate_path(self, path: str) -> str:
         requested = unquote(urlsplit(path).path)
-        root = self.model_root if requested.startswith("/__model__/") else self.asset_root
-        relative = requested.removeprefix("/__model__/") if root == self.model_root else requested.lstrip("/")
+        is_model = requested.startswith("/__model__/")
+        root = self.model_root if is_model else self.asset_root
+        relative = requested.removeprefix("/__model__/") if is_model else requested.lstrip("/")
         candidate = (root / relative).resolve()
         if candidate != root and root not in candidate.parents:
             return str(root / "__missing__")
