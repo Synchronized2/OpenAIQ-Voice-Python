@@ -18,9 +18,7 @@
       const error = document.getElementById('error');
       const query = new URLSearchParams(location.search);
       const modelUrl = query.get('model');
-      const modelKind = query.get('kind') || 'cubism';
-      const canvas = document.getElementById('stage');
-      let app, model, avatar, lastState = 'idle', gazeX = 0, gazeY = 0;
+      let app, model, lastState = 'idle', gazeX = 0, gazeY = 0;
       const stateGroups = {
         idle: ['Idle', 'idle'], listening: ['Flick', 'Tap', 'Idle', 'idle'],
         thinking: ['FlickUp', 'Flick', 'Idle', 'idle'], executing: ['Tap@Body', 'Tap', 'Idle', 'idle'],
@@ -28,7 +26,6 @@
       };
       const showError = message => { error.hidden = false; error.textContent = 'Live2D 加载失败\n' + message; };
       const fit = () => {
-        if (avatar) return;
         if (!app || !model) return;
         const width = innerWidth, height = innerHeight;
         app.renderer.resize(width, height);
@@ -39,11 +36,6 @@
         model.position.set(width / 2 - internal.localTransform.tx * model.scale.x, height * 0.02 - internal.localTransform.ty * model.scale.y);
       };
       const playState = state => {
-        if (avatar) {
-          lastState = state;
-          avatar.stateStarted = performance.now();
-          return;
-        }
         if (!model || state === lastState) return;
         lastState = state;
         const definitions = model.internalModel.motionManager.definitions || {};
@@ -54,133 +46,14 @@
       addEventListener('resize', fit);
       addEventListener('pointermove', event => { gazeX = event.clientX / innerWidth * 2 - 1; gazeY = event.clientY / innerHeight * 2 - 1; });
       addEventListener('pointerleave', () => { gazeX = gazeY = 0; });
-      addEventListener('pointerdown', () => {
-        if (avatar) avatar.cheerUntil = performance.now() + 1300;
-      });
-
-      const loadImage = source => new Promise((resolve, reject) => {
-        const image = new Image();
-        image.onload = () => resolve(image);
-        image.onerror = () => reject(new Error(`无法加载图像：${source}`));
-        image.src = source;
-      });
-
-      const avatarState = now => {
-        if (avatar.cheerUntil > now) return 'speaking';
-        return lastState;
-      };
-
-      const drawAvatar = now => {
-        if (!avatar) return;
-        const ratio = Math.min(devicePixelRatio || 1, 2);
-        const width = innerWidth;
-        const height = innerHeight;
-        if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
-          canvas.width = Math.round(width * ratio);
-          canvas.height = Math.round(height * ratio);
-        }
-        const ctx = avatar.context;
-        ctx.setTransform(ratio, 0, 0, ratio, 0, 0);
-        ctx.clearRect(0, 0, width, height);
-        const image = avatar.base;
-        const state = avatarState(now);
-        const seconds = now / 1000;
-        const motions = {
-          idle: { lean: 0, bob: 2, pace: 0.85 },
-          listening: { lean: -0.012, bob: 3, pace: 1.4 },
-          thinking: { lean: 0.018, bob: 2, pace: 0.55 },
-          executing: { lean: -0.01, bob: 4, pace: 1.9 },
-          speaking: { lean: 0, bob: 4, pace: 2.5 },
-          error: { lean: 0.025, bob: 1, pace: 0.45 },
-        };
-        const motion = motions[state] || motions.idle;
-        const configured = avatar.manifest.motion || {};
-        const framing = avatar.manifest.view || {};
-        const wide = width / Math.max(height, 1) > 1.25;
-        const scale = Math.min(width / image.naturalWidth, height / image.naturalHeight)
-          * Number(wide ? framing.wideZoom || framing.zoom || 0.985 : framing.zoom || 0.985);
-        const breath = 1 + Math.sin(seconds * motion.pace * Math.PI) * Number(configured.breath || 0.006);
-        const sway = Math.sin(seconds * motion.pace) * Number(configured.sway || 0.012);
-        const pointer = Number(configured.pointer || 0.018);
-        const centerX = width / 2 + gazeX * width * pointer
-          + Math.sin(seconds * 0.7) * motion.bob + sway * width * 0.35;
-        const offsetY = wide ? framing.wideOffsetY ?? framing.offsetY ?? 0 : framing.offsetY || 0;
-        const centerY = height / 2 + height * Number(offsetY)
-          + gazeY * height * pointer * 0.32 + Math.sin(seconds * motion.pace * 1.4) * motion.bob;
-        ctx.save();
-        ctx.translate(centerX, centerY);
-        ctx.scale(scale / breath, scale * breath);
-        ctx.translate(-image.naturalWidth / 2, -image.naturalHeight / 2);
-        ctx.drawImage(image, 0, 0);
-
-        let expressionName = state;
-        const blinkPhase = now % 4300;
-        if (blinkPhase > 4140 && state !== 'error') expressionName = 'blink';
-        const overlay = avatar.expressions[expressionName];
-        if (overlay) {
-          const transition = Math.min(1, (now - avatar.stateStarted) / 180);
-          ctx.globalAlpha = 0.92 * transition;
-          ctx.drawImage(overlay, 0, 0, image.naturalWidth, image.naturalHeight);
-          ctx.globalAlpha = 1;
-        }
-
-        if (state === 'speaking') {
-          const [mouthX, mouthY] = avatar.manifest.face?.mouth || [512, 326];
-          const openness = 2 + Math.abs(Math.sin(seconds * 10.5)) * 5;
-          ctx.fillStyle = 'rgba(92, 35, 55, 0.58)';
-          ctx.beginPath();
-          ctx.ellipse(mouthX, mouthY, 8.5, openness, 0, 0, Math.PI * 2);
-          ctx.fill();
-          ctx.fillStyle = 'rgba(255, 175, 185, 0.45)';
-          ctx.beginPath();
-          ctx.ellipse(mouthX, mouthY + openness * 0.35, 7, Math.max(2, openness * 0.28), 0, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        if (state === 'listening' || state === 'speaking') {
-          const [blushX, blushY] = avatar.manifest.face?.blush || [512, 302];
-          ctx.fillStyle = `rgba(255, 130, 155, ${0.035 + Math.sin(seconds * 2) * 0.012})`;
-          ctx.beginPath();
-          ctx.ellipse(blushX - 72, blushY, 28, 12, 0, 0, Math.PI * 2);
-          ctx.ellipse(blushX + 72, blushY, 28, 12, 0, 0, Math.PI * 2);
-          ctx.fill();
-        }
-        ctx.restore();
-        requestAnimationFrame(drawAvatar);
-      };
-
-      const loadAvatar = async source => {
-        const response = await fetch(source);
-        if (!response.ok) throw new Error(`角色清单请求失败：${response.status}`);
-        const manifest = await response.json();
-        if (manifest.format !== 'openaiq-2.5d-avatar' || !manifest.image) throw new Error('2.5D 角色清单格式无效');
-        const baseUrl = new URL('.', new URL(source, location.href));
-        const base = await loadImage(new URL(manifest.image, baseUrl));
-        const expressions = {};
-        await Promise.all(Object.entries(manifest.expressions || {}).map(async ([name, path]) => {
-          expressions[name] = await loadImage(new URL(path, baseUrl));
-        }));
-        avatar = {
-          manifest, base, expressions,
-          context: canvas.getContext('2d'),
-          stateStarted: performance.now(),
-          cheerUntil: 0,
-        };
-        error.hidden = true;
-        requestAnimationFrame(drawAvatar);
-      };
-
       (async () => {
         try {
           if (location.protocol === 'file:') {
             throw new Error('请运行 run-ui.ps1 启动 Voice，不要直接双击此 HTML 文件');
           }
-          if (!modelUrl) throw new Error('缺少模型路径，请从 Voice 设置中选择 2D 形象');
-          if (modelKind === 'avatar') {
-            await loadAvatar(modelUrl);
-            return;
-          }
           if (!window.PIXI || !window.PIXI.live2d) throw new Error('渲染组件不可用，请重新运行 setup.ps1');
-          app = new PIXI.Application({ view: canvas, backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: Math.min(devicePixelRatio, 2) });
+          if (!modelUrl) throw new Error('缺少模型路径，请从 Voice 设置中选择 2D 形象');
+          app = new PIXI.Application({ view: document.getElementById('stage'), backgroundAlpha: 0, antialias: true, autoDensity: true, resolution: Math.min(devicePixelRatio, 2) });
           const { Live2DModel, config } = window.PIXI.live2d;
           config.sound = false;
           model = await Live2DModel.from(modelUrl, { autoInteract: false, autoUpdate: true });

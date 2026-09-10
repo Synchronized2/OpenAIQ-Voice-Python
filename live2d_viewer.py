@@ -8,7 +8,6 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit, quote
 
 from PySide6.QtCore import QUrl, Qt
-from PySide6.QtGui import QColor
 from PySide6.QtWidgets import QFrame, QLabel, QVBoxLayout, QWidget
 
 from live2d_models import Live2DModel
@@ -80,7 +79,6 @@ class Live2DView(QFrame):
         if WEBENGINE_AVAILABLE:
             self._web = QWebEngineView(self)
             self._web.setContextMenuPolicy(Qt.NoContextMenu)
-            self._web.page().setBackgroundColor(QColor(Qt.transparent))
             self._web.loadFinished.connect(
                 lambda ok: self.set_state(self._state) if ok else None
             )
@@ -105,11 +103,7 @@ class Live2DView(QFrame):
             self._server.close()
         asset_root = Path(__file__).resolve().parent / "assets" / "live2d"
         self._server = _AssetServer(asset_root, model.root)
-        model_url = (
-            f"{self._server.url}/live2d-viewer.html"
-            f"?model={quote('/__model__/' + model.relative_manifest)}"
-            f"&kind={quote(model.kind)}"
-        )
+        model_url = f"{self._server.url}/live2d-viewer.html?model={quote('/__model__/' + model.relative_manifest)}"
         self._web.setUrl(QUrl(model_url))
 
     def set_state(self, state: str) -> None:

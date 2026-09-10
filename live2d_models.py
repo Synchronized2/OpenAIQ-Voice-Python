@@ -16,7 +16,6 @@ class Live2DModel:
     manifest: Path
     root: Path
     generation: int
-    kind: str = "cubism"
 
     @property
     def relative_manifest(self) -> str:
@@ -27,20 +26,14 @@ def default_model_root(base: Path | None = None) -> Path:
     return (base or Path(__file__).resolve().parent) / "assets" / "live2d"
 
 
-def _descriptor(data: Any) -> tuple[int, str, list[str], str, str | None] | None:
+def _descriptor(data: Any) -> tuple[int, str, list[str]] | None:
     if not isinstance(data, dict):
         return None
-    if data.get("format") == "openaiq-2.5d-avatar" and isinstance(data.get("image"), str):
-        expressions = data.get("expressions", {})
-        if not isinstance(expressions, dict) or any(not isinstance(value, str) for value in expressions.values()):
-            return None
-        name = data.get("name") if isinstance(data.get("name"), str) else None
-        return 0, data["image"], list(expressions.values()), "avatar", name
     modern = data.get("FileReferences")
     if isinstance(modern, dict) and isinstance(modern.get("Moc"), str) and isinstance(modern.get("Textures"), list):
-        return 3, modern["Moc"], modern["Textures"], "cubism", None
+        return 3, modern["Moc"], modern["Textures"]
     if isinstance(data.get("model"), str) and isinstance(data.get("textures"), list):
-        return 2, data["model"], data["textures"], "cubism", None
+        return 2, data["model"], data["textures"]
     return None
 
 
@@ -65,7 +58,7 @@ def _model_id(root: Path, manifest: Path) -> str:
 
 
 def scan_live2d_models(root: str | Path) -> list[Live2DModel]:
-    """Recursively find valid Cubism and OpenAIQ 2.5D manifests below *root*.
+    """Recursively find valid v2/v3 manifests below *root*.
 
     Only model and texture references are required for selection. Optional
     motion, expression and physics files are left to the browser runtime so a
@@ -79,7 +72,6 @@ def scan_live2d_models(root: str | Path) -> list[Live2DModel]:
     candidates = sorted(
         set(base.rglob("*.model.json"))
         | set(base.rglob("*.model3.json"))
-        | set(base.rglob("*.avatar.json"))
         | set(base.rglob("index.json")),
         key=lambda path: path.as_posix().lower(),
     )
@@ -89,7 +81,7 @@ def scan_live2d_models(root: str | Path) -> list[Live2DModel]:
             descriptor = _descriptor(data)
             if descriptor is None:
                 continue
-            generation, core, textures, kind, display_name = descriptor
+            generation, core, textures = descriptor
             _resolve_resource(base, manifest, core)
             if not textures or any(not isinstance(item, str) for item in textures):
                 continue
@@ -98,12 +90,12 @@ def scan_live2d_models(root: str | Path) -> list[Live2DModel]:
         except (OSError, ValueError, json.JSONDecodeError, FileNotFoundError):
             continue
         relative = manifest.relative_to(base)
-        name = display_name or relative.parent.name or manifest.stem
+        name = relative.parent.name or manifest.stem
         if name.lower() in {"runtime", "model", "models"}:
             name = manifest.stem.replace(".model3", "").replace(".model", "")
         if "hiyori" in relative.as_posix().lower():
             name = "Hiyori / 日和"
-        models.append(Live2DModel(_model_id(base, manifest), name, manifest, base, generation, kind))
+        models.append(Live2DModel(_model_id(base, manifest), name, manifest, base, generation))
     return models
 
 

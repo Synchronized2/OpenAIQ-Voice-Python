@@ -185,9 +185,7 @@ FireRedVAD 检测到第一处语音端点后便立即提交，不会把较长静
 
 不要直接双击 `assets/live2d/live2d-viewer.html`，它是 Voice 内部使用的渲染页面，不是独立网页入口；请运行 `run-ui.ps1`，由程序提供本地资源服务并传入当前模型路径。
 
-设置面板的“2D 形象”区域支持选择模型目录并递归扫描。将包含 `.model3.json`、`.model.json`、兼容 `index.json` 或 OpenAIQ `*.avatar.json` 的完整模型目录复制到任意位置，点击“选择目录”后扫描即可；程序只列出核心文件和纹理引用完整的模型。模型选择会保存到 `ui-settings.json`，下次启动自动恢复。
-
-仓库还包含根据 `new_models/png` 素材制作的“婚纱雏田 / Wedding Hinata”2.5D 角色包。它可在同一个形象列表中扫描和切换，支持呼吸、摇摆、鼠标视差、眨眼、朗读口型和状态表情。该角色包采用 OpenAIQ 的 `*.avatar.json` 格式，不是 Cubism Editor 导出的 `.moc3`；平面图片无法自动恢复为原生 Live2D 网格和变形器工程。
+设置面板的“2D 形象”区域支持选择模型目录并递归扫描。将包含 `.model3.json`、`.model.json` 或兼容 `index.json` 的完整模型目录复制到任意位置，点击“选择目录”后扫描即可；程序只列出核心文件和纹理引用完整的模型。模型选择会保存到 `ui-settings.json`，下次启动自动恢复。
 
 Live2D 渲染使用 PySide6 WebEngine，`setup.ps1` 会通过 `requirements.txt` 安装 `PySide6-Addons`。若运行环境未安装 WebEngine，界面仍可启动，但会显示安装提示而不会影响语音功能。
 
