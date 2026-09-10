@@ -11,9 +11,19 @@ from live2d_models import scan_live2d_models
 class Live2DModelScannerTests(unittest.TestCase):
     def test_discovers_hiyori_asset(self) -> None:
         models = scan_live2d_models(Path(__file__).parents[1] / "assets" / "live2d")
-        self.assertEqual(len(models), 1)
-        self.assertEqual(models[0].name, "Hiyori / 日和")
-        self.assertEqual(models[0].generation, 3)
+        hiyori = next(model for model in models if "Hiyori" in model.name)
+        self.assertEqual(hiyori.name, "Hiyori / 日和")
+        self.assertEqual(hiyori.generation, 3)
+        self.assertEqual(hiyori.kind, "cubism")
+
+    def test_discovers_wedding_hinata_avatar(self) -> None:
+        models = scan_live2d_models(Path(__file__).parents[1] / "assets" / "live2d")
+        hinata = next(model for model in models if "Wedding Hinata" in model.name)
+        self.assertEqual(hinata.kind, "avatar")
+        self.assertEqual(
+            hinata.relative_manifest,
+            "wedding_hinata_25d/wedding-hinata.avatar.json",
+        )
 
     def test_rejects_missing_and_path_traversal_resources(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
