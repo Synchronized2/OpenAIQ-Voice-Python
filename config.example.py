@@ -5,7 +5,7 @@ from pathlib import Path
 
 CHAT_BASE_URL = "https://www.pcie.cloud/v1"
 CHAT_API_KEY = ""
-CHAT_MODEL = "gpt-5.3-codex-spark"
+CHAT_MODEL = "gpt-5.6-luna"
 CHAT_REASONING_EFFORT = "low"
 CHAT_FIRST_TOKEN_TIMEOUT_SECONDS = 30.0
 CHAT_TOTAL_TIMEOUT_SECONDS = 90.0
@@ -17,6 +17,15 @@ CHAT_MODEL_OPTIONS = (
     ("gpt-5.6-sol", "复杂问题和代码"),
     ("qwen3.7-plus", "中文对话"),
 )
+
+# Image generation uses the same OpenAI-compatible URL and Key by default.
+IMAGE_MODEL = "gpt-image-2"
+IMAGE_OUTPUT_DIR = str(Path(__file__).resolve().parent / "generated-images")
+# Spark currently answers image requests in text instead of calling tools. For those
+# models only, a tool-capable chat model makes the image intent decision first.
+IMAGE_TOOL_ROUTER_MODEL = "gpt-5.6-luna"
+IMAGE_TOOL_INCOMPATIBLE_MODELS = ("gpt-5.3-codex-spark",)
+IMAGE_TOOL_ROUTER_TIMEOUT_SECONDS = 15.0
 
 TTS_VOICE = "zh-CN-XiaoxiaoNeural"
 TTS_RATE = "+0%"

@@ -251,6 +251,83 @@ class GuiSmokeTests(unittest.TestCase):
                 window.deleteLater()
                 self.app.processEvents()
 
+    def test_chat_tool_call_starts_image_generation_after_worker_finishes(self) -> None:
+        with patch.object(config, "WAKE_WORD_ENABLED", False), patch.object(
+            config, "TTS_BARGE_IN_ENABLED", False
+        ), patch.object(
+            VoiceWindow, "_initialize_services", lambda _window: None
+        ), patch.object(VoiceWindow, "_register_hotkey", lambda _window: None):
+            window = VoiceWindow()
+            window.chat = MagicMock()
+            window.chat.last_tool_call = {
+                "id": "call-1",
+                "name": "generate_image",
+                "prompt": "月球上的孙悟空",
+            }
+            window.current_assistant = MagicMock()
+            try:
+                self.assertTrue(window.runtime.start("chat", RuntimeState.PROCESSING))
+                window._chat_finished("", False, 1.25)
+
+                self.assertEqual(window.pending_image_prompt, "月球上的孙悟空")
+                window.current_assistant.text_label.setText.assert_called_with(
+                    "已理解你的要求，正在准备生成图片…"
+                )
+
+                with patch.object(window, "_start_image") as start_image, patch(
+                    "gui.QTimer.singleShot", side_effect=lambda _delay, callback: callback()
+                ):
+                    window._worker_finished("chat")
+
+                start_image.assert_called_once_with("月球上的孙悟空")
+                self.assertIsNone(window.pending_image_prompt)
+                self.assertFalse(window.runtime.busy)
+            finally:
+                window.exiting = True
+                window._stop_ui_timers()
+                window.close()
+                window.compact_window.close()
+                window.voice_overlay.close()
+                window.tray.hide()
+                window.deleteLater()
+                self.app.processEvents()
+
+    def test_image_generation_pauses_and_then_resumes_voice_listening(self) -> None:
+        with patch.object(config, "WAKE_WORD_ENABLED", False), patch.object(
+            VoiceWindow, "_initialize_services", lambda _window: None
+        ), patch.object(VoiceWindow, "_register_hotkey", lambda _window: None):
+            window = VoiceWindow()
+            try:
+                window.current_mode = "voice"
+                window.voice_enabled = True
+                window._sync_listening_ui(True)
+                window._pause_listening_for_image()
+
+                self.assertFalse(window.voice_overlay.core.active)
+                self.assertEqual(window.voice_overlay.state_label.text(), "正在生成图片")
+                self.assertIn("麦克风已暂停", window.voice_overlay.partial_label.text())
+                self.assertTrue(window.voice_enabled)
+
+                self.assertTrue(
+                    window.runtime.start("image", RuntimeState.GENERATING)
+                )
+                with patch.object(window, "_start_asr") as start_asr, patch(
+                    "gui.QTimer.singleShot", side_effect=lambda _delay, callback: callback()
+                ):
+                    window._worker_finished("image")
+
+                start_asr.assert_called_once_with()
+                self.assertFalse(window.runtime.busy)
+            finally:
+                window.exiting = True
+                window._stop_ui_timers()
+                window.close()
+                window.compact_window.close()
+                window.voice_overlay.close()
+                window.tray.hide()
+                window.deleteLater()
+                self.app.processEvents()
+
 
 if __name__ == "__main__":
     unittest.main()

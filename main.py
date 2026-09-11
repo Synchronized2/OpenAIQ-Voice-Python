@@ -12,6 +12,7 @@ from agent import LocalAgent, is_voice_exit_phrase, parse_local_intent
 from asr import StreamingASR, list_audio_devices
 from chat import ChatSession
 from diagnostics import configure_logging
+from image_generation import ImageGenerator
 from tts import EdgeSpeaker
 
 
@@ -86,7 +87,16 @@ def choose_chat_model(requested: str | None = None) -> str:
         print("请输入列表中的编号。")
 
 
-def run_text_mode(model: str) -> int:
+def build_image_generator(image_model: str) -> ImageGenerator:
+    return ImageGenerator(
+        base_url=config.CHAT_BASE_URL,
+        api_key=config.chat_api_key(),
+        model=image_model,
+        output_dir=getattr(config, "IMAGE_OUTPUT_DIR", "generated-images"),
+    )
+
+
+def run_text_mode(model: str, image_model: str) -> int:
     print("=" * 58)
     print(" OpenAIQ Voice Python")
     print(" Text -> GPT Chat -> Edge TTS")
@@ -98,6 +108,7 @@ def run_text_mode(model: str) -> int:
         chat = ChatSession(model=model)
         speaker = EdgeSpeaker()
         agent = LocalAgent()
+        image_generator = build_image_generator(image_model)
     except Exception as exc:
         print(f"\n[启动失败] {exc}")
         return 1
@@ -145,6 +156,24 @@ def run_text_mode(model: str) -> int:
                     else:
                         print("\n[已打断当前回复]")
                     continue
+                if chat.last_tool_call:
+                    image_prompt = chat.last_tool_call["prompt"]
+                    try:
+                        path = image_generator.generate(
+                            image_prompt, should_stop=listener.interrupted.is_set
+                        )
+                        chat.record_image_result(image_prompt, str(path))
+                        print(f"\nAI：图片已生成并保存：{path}")
+                        speaker.enqueue("图片已经生成，并保存到本地。")
+                    except KeyboardInterrupt:
+                        chat.record_image_result(image_prompt, None)
+                        print("\n[已中断生图请求]")
+                    except Exception as exc:
+                        chat.record_image_result(image_prompt, None)
+                        print(f"\n[生图失败] {exc}")
+                    if listener.interrupted.is_set():
+                        pending_question = listener.question
+                        continue
                 print("[TTS] 可直接输入下一问题并回车打断；Esc 只停止当前回复。")
                 if not speaker.wait_interruptible(listener.interrupted):
                     if listener.question:
@@ -169,6 +198,7 @@ def run_text_mode(model: str) -> int:
 
 def run_voice_mode(
     model: str,
+    image_model: str,
     model_dir: str | Path,
     vad_model_dir: str | Path,
     device: int | None,
@@ -206,6 +236,7 @@ def run_voice_mode(
         chat = ChatSession(model=model)
         speaker = EdgeSpeaker()
         agent = LocalAgent()
+        image_generator = build_image_generator(image_model)
     except Exception as exc:
         print(f"\n[启动失败] {exc}")
         return 1
@@ -230,6 +261,16 @@ def run_voice_mode(
             try:
                 speaker.begin_response()
                 _, interrupted = chat.reply(user_text, on_sentence=speaker.enqueue)
+                if not interrupted and chat.last_tool_call:
+                    image_prompt = chat.last_tool_call["prompt"]
+                    try:
+                        path = image_generator.generate(image_prompt)
+                        chat.record_image_result(image_prompt, str(path))
+                        print(f"AI：图片已生成并保存：{path}")
+                        speaker.enqueue("图片已经生成，并保存到本地。")
+                    except Exception as exc:
+                        chat.record_image_result(image_prompt, None)
+                        print(f"\n[生图失败] {exc}")
                 if not interrupted:
                     speaker.wait()
             except KeyboardInterrupt:
@@ -250,6 +291,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="OpenAIQ 语音助手")
     parser.add_argument("--text", action="store_true", help="使用原有键盘输入模式")
     parser.add_argument("--model", help="直接指定聊天模型，跳过启动选择菜单")
+    parser.add_argument(
+        "--image-model",
+        default=getattr(config, "IMAGE_MODEL", "gpt-image-2"),
+        help="指定生图模型",
+    )
     parser.add_argument("--list-devices", action="store_true", help="列出麦克风设备")
     parser.add_argument("--model-dir", type=Path, default=Path(config.ASR_MODEL_DIR))
     parser.add_argument("--vad-model-dir", type=Path, default=Path(config.ASR_VAD_MODEL_DIR))
@@ -271,9 +317,10 @@ def main() -> int:
             print("\n正在退出…")
             return 0
     if args.text:
-        return run_text_mode(selected_model)
+        return run_text_mode(selected_model, args.image_model)
     return run_voice_mode(
         model=selected_model,
+        image_model=args.image_model,
         model_dir=args.model_dir,
         vad_model_dir=args.vad_model_dir,
         device=args.device,

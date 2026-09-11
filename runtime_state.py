@@ -10,6 +10,7 @@ class RuntimeState(str, Enum):
     READY = "ready"
     LISTENING = "listening"
     PROCESSING = "processing"
+    GENERATING = "generating"
     EXECUTING = "executing"
     SPEAKING = "speaking"
     STOPPING = "stopping"
@@ -43,4 +44,3 @@ class RuntimeMachine:
             return False
         self.active_worker = None
         return True
-

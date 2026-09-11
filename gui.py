@@ -13,9 +13,10 @@ from collections import deque
 from pathlib import Path
 
 import sounddevice as sd
-from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, Signal
+from PySide6.QtCore import QObject, QPoint, QPointF, QRectF, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAction,
+    QDesktopServices,
     QColor,
     QFont,
     QImage,
@@ -35,6 +36,7 @@ from PySide6.QtWidgets import (
     QFrame,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
     QMainWindow,
     QMenu,
     QMessageBox,
@@ -53,7 +55,10 @@ import config
 from agent import LocalAction, LocalAgent, is_voice_exit_phrase, parse_local_intent
 from asr import StreamingASR
 from chat import ChatSession
+from cancellation import OperationCancelled
 from diagnostics import configure_logging, log
+from image_generation import ImageGenerationError, ImageGenerator
+from model_catalog import classify_models, fetch_model_ids
 from runtime_state import RuntimeMachine, RuntimeState
 from tts import EdgeSpeaker
 from voice_session import BargeSession
@@ -123,6 +128,11 @@ def ui_settings_path() -> Path:
     return base / UI_SETTINGS_FILE
 
 
+def combo_value(combo: QComboBox) -> str:
+    """Return selected data or an editable model name typed by the user."""
+    return combo.currentText().strip()
+
+
 def load_ui_preferences() -> dict:
     try:
         data = json.loads(ui_settings_path().read_text(encoding="utf-8"))
@@ -145,7 +155,9 @@ def load_ui_preferences() -> dict:
         **{key: value for key, value in data.items()
            if key in {"speak", "barge_in", "wake"} and type(value) is bool},
         **{key: value for key, value in data.items()
-           if key in {"model", "device_name"} and isinstance(value, str)},
+           if key in {
+               "model", "image_model", "provider_url", "provider_api_key", "device_name"
+           } and isinstance(value, str)},
         **{key: value for key, value in data.items()
            if key in {"live2d_root", "live2d_model"} and isinstance(value, str)},
     }
@@ -170,6 +182,11 @@ class UiSignals(QObject):
     chat_delta = Signal(str)
     chat_finished = Signal(str, bool, float)
     agent_finished = Signal(str, bool, float)
+    image_finished = Signal(str, float)
+    image_failed = Signal(str, float)
+    image_cancelled = Signal(float)
+    models_loaded = Signal(object, object)
+    models_failed = Signal(str)
     error = Signal(str)
     worker_finished = Signal(str)
 
@@ -410,12 +427,13 @@ class TitleBar(QFrame):
         layout.addWidget(title)
         layout.addStretch()
 
-        model_label = QLabel("模型")
+        model_label = QLabel("对话模型")
         model_label.setObjectName("topModelLabel")
         layout.addWidget(model_label)
         self.model_combo = QComboBox()
         self.model_combo.setObjectName("topModelCombo")
         self.model_combo.setFixedWidth(158)
+        self.model_combo.setEditable(True)
         for model, description in config.CHAT_MODEL_OPTIONS:
             self.model_combo.addItem(model, model)
             self.model_combo.setItemData(self.model_combo.count() - 1, description, Qt.ToolTipRole)
@@ -972,8 +990,18 @@ class MessageBubble(QFrame):
         self.meta_label.setObjectName("bubbleMeta")
         self.meta_label.setWordWrap(True)
         self.meta_label.hide()
+        self.image_label = QLabel()
+        self.image_label.setObjectName("generatedImage")
+        self.image_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.image_label.setMinimumSize(0, 0)
+        self.image_label.hide()
+        self.open_image_button = QPushButton("打开图片")
+        self.open_image_button.setObjectName("openImageButton")
+        self.open_image_button.hide()
         layout.addWidget(role_label)
         layout.addWidget(self.text_label)
+        layout.addWidget(self.image_label)
+        layout.addWidget(self.open_image_button, 0, Qt.AlignLeft)
         layout.addWidget(self.meta_label)
 
     def append_text(self, text: str) -> None:
@@ -982,6 +1010,21 @@ class MessageBubble(QFrame):
     def set_meta(self, text: str) -> None:
         self.meta_label.setText(text)
         self.meta_label.setVisible(bool(text))
+
+    def set_image(self, path: str | Path) -> None:
+        image_path = Path(path).resolve()
+        pixmap = QPixmap(str(image_path))
+        if pixmap.isNull():
+            self.text_label.setText(f"图片已保存，但预览加载失败：{image_path}")
+            return
+        preview = pixmap.scaled(520, 420, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        self.image_label.setPixmap(preview)
+        self.image_label.setFixedSize(preview.size())
+        self.image_label.show()
+        self.open_image_button.clicked.connect(
+            lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(image_path)))
+        )
+        self.open_image_button.show()
 
     def set_compact(self, compact: bool) -> None:
         self.setMinimumWidth(220 if compact else (270 if self.role == "user" else 410))
@@ -1009,6 +1052,10 @@ class VoiceWindow(QMainWindow):
     def agent_running(self) -> bool:
         return self.runtime.is_running("agent")
 
+    @property
+    def image_running(self) -> bool:
+        return self.runtime.is_running("image")
+
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("OpenAIQ Voice")
@@ -1029,6 +1076,8 @@ class VoiceWindow(QMainWindow):
         self.asr_thread: threading.Thread | None = None
         self.chat_thread: threading.Thread | None = None
         self.agent_thread: threading.Thread | None = None
+        self.image_thread: threading.Thread | None = None
+        self.models_thread: threading.Thread | None = None
         self.preview_thread: threading.Thread | None = None
         self.barge_thread: threading.Thread | None = None
         self.barge_session: BargeSession | None = None
@@ -1041,6 +1090,7 @@ class VoiceWindow(QMainWindow):
         self.voice_enabled = False
         self.runtime = RuntimeMachine()
         self.pending_prompts: deque[str] = deque()
+        self.pending_image_prompt: str | None = None
         self.current_assistant: MessageBubble | None = None
         self.exiting = False
         self.has_error = False
@@ -1062,6 +1112,10 @@ class VoiceWindow(QMainWindow):
         )
         self.asr_wake_only = False
         self.ui_preferences = load_ui_preferences()
+        self.provider_url = self.ui_preferences.get("provider_url", config.CHAT_BASE_URL).strip()
+        self.provider_api_key = self.ui_preferences.get(
+            "provider_api_key", config.chat_api_key()
+        ).strip()
         self.wake_enabled = self.ui_preferences.get("wake", self.wake_enabled)
         self.compact_pet_size = self.ui_preferences["compact_pet_size"]
         self.ui_animation_fps = self.ui_preferences["ui_animation_fps"]
@@ -1117,9 +1171,12 @@ class VoiceWindow(QMainWindow):
         self.status_dot = self.title_bar.status_dot
         self.status_label = self.title_bar.status_label
         self.model_combo = self.title_bar.model_combo
-        preferred_model = self.model_combo.findData(self.ui_preferences.get("model", config.CHAT_MODEL))
+        preferred_chat_model = self.ui_preferences.get("model", config.CHAT_MODEL)
+        preferred_model = self.model_combo.findText(preferred_chat_model)
         if preferred_model >= 0:
             self.model_combo.setCurrentIndex(preferred_model)
+        else:
+            self.model_combo.setEditText(preferred_chat_model)
         self.clear_button = self.title_bar.new_chat_button
         self.settings_nav = self.title_bar.settings_button
         self.recent_label = QLabel("新的语音对话")
@@ -1274,6 +1331,35 @@ class VoiceWindow(QMainWindow):
         self.device_combo.setToolTip("切换后使用新麦克风，已加载的语音模型会保留")
         settings.addSpacing(10)
 
+        settings.addWidget(section_label("模型服务"))
+        self.provider_url_input = QLineEdit(self.provider_url)
+        self.provider_url_input.setObjectName("providerInput")
+        self.provider_url_input.setPlaceholderText("https://example.com/v1")
+        self.provider_url_input.setToolTip("OpenAI 兼容服务 URL；对话与生图共用")
+        settings.addWidget(self.provider_url_input)
+        self.provider_key_input = QLineEdit(self.provider_api_key)
+        self.provider_key_input.setObjectName("providerInput")
+        self.provider_key_input.setEchoMode(QLineEdit.Password)
+        self.provider_key_input.setPlaceholderText("API Key")
+        settings.addWidget(self.provider_key_input)
+        self.image_model_combo = QComboBox()
+        self.image_model_combo.setObjectName("imageModelCombo")
+        self.image_model_combo.setEditable(True)
+        default_image_model = str(getattr(config, "IMAGE_MODEL", "gpt-image-2"))
+        image_model = self.ui_preferences.get("image_model", default_image_model)
+        self.image_model_combo.addItem(image_model, image_model)
+        settings.addWidget(QLabel("生图模型（可手动输入）"))
+        settings.addWidget(self.image_model_combo)
+        self.refresh_models_button = QPushButton("获取模型列表")
+        self.refresh_models_button.setObjectName("refreshModelsButton")
+        self.refresh_models_button.setToolTip("从服务的 /models 接口读取，然后分别填入对话与生图模型")
+        settings.addWidget(self.refresh_models_button)
+        self.model_catalog_hint = QLabel("对话模型在窗口顶部选择，也可直接输入模型名称。")
+        self.model_catalog_hint.setObjectName("settingHint")
+        self.model_catalog_hint.setWordWrap(True)
+        settings.addWidget(self.model_catalog_hint)
+        settings.addSpacing(10)
+
         settings.addWidget(section_label("2D 形象"))
         self.live2d_model_combo = QComboBox()
         self.live2d_model_combo.setObjectName("live2dModelCombo")
@@ -1415,6 +1501,13 @@ class VoiceWindow(QMainWindow):
         self.input.submit.connect(self._submit_input)
         self.input.textChanged.connect(self._sync_send_button)
         self.model_combo.currentIndexChanged.connect(self._change_model)
+        self.model_combo.currentTextChanged.connect(self._change_model)
+        self.image_model_combo.currentTextChanged.connect(
+            lambda _value: self.ui_settings_save_timer.start(250)
+        )
+        self.provider_url_input.editingFinished.connect(self._provider_settings_changed)
+        self.provider_key_input.editingFinished.connect(self._provider_settings_changed)
+        self.refresh_models_button.clicked.connect(self._fetch_models)
         self.device_combo.currentIndexChanged.connect(self._device_changed)
         self.live2d_model_combo.currentIndexChanged.connect(self._live2d_model_changed)
         self.live2d_scan_button.clicked.connect(self._scan_live2d_directory)
@@ -1428,6 +1521,7 @@ class VoiceWindow(QMainWindow):
         for control in (self.tts_check, self.barge_check, self.wake_check):
             control.toggled.connect(lambda _value: self.ui_settings_save_timer.start(250))
         self.model_combo.currentIndexChanged.connect(lambda _value: self.ui_settings_save_timer.start(250))
+        self.model_combo.currentTextChanged.connect(lambda _value: self.ui_settings_save_timer.start(250))
         self.device_combo.currentIndexChanged.connect(lambda _value: self.ui_settings_save_timer.start(250))
         self.live2d_model_combo.currentIndexChanged.connect(lambda _value: self.ui_settings_save_timer.start(250))
         self.pet_size_slider.valueChanged.connect(self._pet_size_changed)
@@ -1445,6 +1539,11 @@ class VoiceWindow(QMainWindow):
         self.signals.chat_delta.connect(self._chat_delta)
         self.signals.chat_finished.connect(self._chat_finished)
         self.signals.agent_finished.connect(self._agent_finished)
+        self.signals.image_finished.connect(self._image_finished)
+        self.signals.image_failed.connect(self._image_failed)
+        self.signals.image_cancelled.connect(self._image_cancelled)
+        self.signals.models_loaded.connect(self._models_loaded)
+        self.signals.models_failed.connect(self._models_failed)
         self.signals.error.connect(self._show_error)
         self.signals.worker_finished.connect(self._worker_finished)
 
@@ -1567,7 +1666,10 @@ class VoiceWindow(QMainWindow):
             "speak": self.tts_check.isChecked(),
             "barge_in": self.barge_check.isChecked(),
             "wake": self.wake_check.isChecked(),
-            "model": self.model_combo.currentData(),
+            "model": combo_value(self.model_combo),
+            "image_model": combo_value(self.image_model_combo),
+            "provider_url": self.provider_url_input.text().strip(),
+            "provider_api_key": self.provider_key_input.text().strip(),
             "device_name": self.device_combo.currentText(),
             "tts_voice": normalize_voice(self.tts_voice_combo.currentData()),
             "tts_rate": self.tts_rate_slider.value(),
@@ -1588,7 +1690,6 @@ class VoiceWindow(QMainWindow):
 
     def _initialize_services(self) -> None:
         try:
-            self.chat = ChatSession(model=self.model_combo.currentData())
             voice, rate, volume = self._speech_options()
             self.speaker = EdgeSpeaker(
                 on_segment_start=self.signals.tts_segment.emit,
@@ -1596,9 +1697,94 @@ class VoiceWindow(QMainWindow):
                 rate=rate,
                 volume=volume,
             )
+            if self.provider_url and self.provider_api_key:
+                self.chat = ChatSession(
+                    model=combo_value(self.model_combo),
+                    base_url=self.provider_url,
+                    api_key=self.provider_api_key,
+                )
             self._set_runtime_state(RuntimeState.READY)
+            if self.chat is None:
+                self._set_status("请在设置中填写模型服务", "ready")
         except Exception as exc:
             self._show_error(str(exc))
+
+    def _provider_settings_changed(self) -> None:
+        self.provider_url = self.provider_url_input.text().strip()
+        self.provider_api_key = self.provider_key_input.text().strip()
+        if self.chat:
+            self.chat.base_url = self.provider_url
+            self.chat.api_key = self.provider_api_key
+        elif self.provider_url and self.provider_api_key:
+            try:
+                self.chat = ChatSession(
+                    model=combo_value(self.model_combo),
+                    base_url=self.provider_url,
+                    api_key=self.provider_api_key,
+                )
+            except Exception as exc:
+                self._set_status(str(exc), "error")
+        self.ui_settings_save_timer.start(250)
+        if self.provider_url and self.provider_api_key:
+            self._set_status("模型服务设置已更新", "ready")
+
+    def _fetch_models(self) -> None:
+        if self.models_thread is not None and self.models_thread.is_alive():
+            return
+        self._provider_settings_changed()
+        base_url = self.provider_url
+        api_key = self.provider_api_key
+        self.refresh_models_button.setEnabled(False)
+        self.refresh_models_button.setText("正在获取…")
+        self.model_catalog_hint.setText("正在读取服务模型列表…")
+
+        def work() -> None:
+            try:
+                chat_models, image_models = classify_models(
+                    fetch_model_ids(base_url, api_key)
+                )
+                self.signals.models_loaded.emit(chat_models, image_models)
+            except Exception as exc:
+                self.signals.models_failed.emit(str(exc))
+
+        self.models_thread = threading.Thread(
+            target=work, name="gui-model-catalog", daemon=True
+        )
+        self.models_thread.start()
+
+    @staticmethod
+    def _replace_model_items(combo: QComboBox, models: list[str]) -> None:
+        current = combo_value(combo)
+        combo.blockSignals(True)
+        combo.clear()
+        for model in models:
+            combo.addItem(model, model)
+        if current and current not in models:
+            combo.addItem(current, current)
+        if current:
+            combo.setCurrentText(current)
+        elif combo.count():
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+
+    def _models_loaded(self, chat_models: list[str], image_models: list[str]) -> None:
+        self._replace_model_items(self.model_combo, chat_models)
+        self._replace_model_items(self.image_model_combo, image_models)
+        self.refresh_models_button.setEnabled(True)
+        self.refresh_models_button.setText("重新获取模型列表")
+        self.model_catalog_hint.setText(
+            f"已发现 {len(chat_models)} 个对话模型、{len(image_models)} 个生图模型。"
+            "未识别到的模型仍可手动输入。"
+        )
+        self._change_model()
+        self.ui_settings_save_timer.start(250)
+        self._set_status("模型列表已更新", "ready")
+
+    def _models_failed(self, message: str) -> None:
+        self.refresh_models_button.setEnabled(True)
+        self.refresh_models_button.setText("重新获取模型列表")
+        self.model_catalog_hint.setText(f"{message} 可继续手动输入模型名称。")
+        self._set_status("模型列表获取失败", "error")
 
     def _load_devices(self) -> None:
         self.device_combo.blockSignals(True)
@@ -1654,7 +1840,7 @@ class VoiceWindow(QMainWindow):
         self._show_conversation()
         self.recent_label.setText(text[:38] + ("…" if len(text) > 38 else ""))
         self._add_message("user", text)
-        if self.chat_running or self.asr_running or self.agent_running:
+        if self.runtime.busy:
             self.pending_prompts.append(text)
             self.chat_stop.set()
             self.asr_stop.set()
@@ -1671,6 +1857,90 @@ class VoiceWindow(QMainWindow):
             self._start_agent(action)
         else:
             self._start_chat(text)
+
+    def _start_image(self, prompt: str) -> None:
+        if not self._begin_worker("image", RuntimeState.GENERATING):
+            return
+        self.has_error = False
+        self.active_image_prompt = prompt
+        self._pause_listening_for_image()
+        self.chat_stop = threading.Event()
+        stopped = self.chat_stop
+        self._show_conversation()
+        if self.current_assistant:
+            self.current_assistant.text_label.setText("正在生成图片…")
+        else:
+            self.current_assistant = self._add_message("assistant", "正在生成图片…")
+        speak = self.tts_check.isChecked() and self.speaker is not None
+        selected_device = self.device_combo.currentData()
+        base_url = self.provider_url_input.text().strip()
+        api_key = self.provider_key_input.text().strip()
+        image_model = combo_value(self.image_model_combo)
+        output_dir = getattr(config, "IMAGE_OUTPUT_DIR", "generated-images")
+
+        def work() -> None:
+            started = time.perf_counter()
+            try:
+                generator = ImageGenerator(
+                    base_url=base_url,
+                    api_key=api_key,
+                    model=image_model,
+                    output_dir=output_dir,
+                )
+                path = generator.generate(prompt, should_stop=stopped.is_set)
+                if stopped.is_set():
+                    self.signals.image_cancelled.emit(time.perf_counter() - started)
+                    return
+                elapsed = time.perf_counter() - started
+                self.signals.image_finished.emit(str(path), elapsed)
+                if speak and self.speaker:
+                    message = "图片已经生成，并保存到本地。"
+                    barge_active = None
+                    try:
+                        self.signals.runtime_state.emit(RuntimeState.SPEAKING)
+                        self.speaker.begin_response()
+                        barge_active = self._start_barge_in_monitor(
+                            self.barge_check.isChecked(), selected_device
+                        )
+                        self.speaker.enqueue(message)
+                        self.speaker.wait_interruptible(stopped)
+                        barge_triggered, barge_text = self._finish_barge_in_monitor(barge_active)
+                        self.signals.tts_segment.emit("")
+                        if barge_triggered:
+                            self.signals.barge_in_finished.emit(barge_text, barge_active)
+                    except Exception as exc:
+                        self.speaker.stop()
+                        self._finish_barge_in_monitor(barge_active)
+                        self.signals.tts_segment.emit("")
+                        self.signals.error.emit(f"生图结果朗读失败：{exc}")
+            except OperationCancelled:
+                self.signals.image_cancelled.emit(time.perf_counter() - started)
+            except Exception as exc:
+                if not stopped.is_set():
+                    self.signals.image_failed.emit(
+                        str(exc), time.perf_counter() - started
+                    )
+            finally:
+                self.signals.worker_finished.emit("image")
+
+        self._set_status(f"正在通过 {image_model} 生成图片", "busy")
+        self.image_thread = threading.Thread(target=work, name="gui-image", daemon=True)
+        self.image_thread.start()
+
+    def _pause_listening_for_image(self) -> None:
+        """Release microphone listeners while preserving the voice-session intent."""
+        self.asr_stop.set()
+        self.barge_stop.set()
+        self._sync_listening_ui(False)
+        if self.current_mode == "voice":
+            self.voice_overlay.waveform.set_level(0.0)
+            self.voice_overlay.state_label.setText("正在生成图片")
+            self.voice_overlay.partial_label.setText(
+                "麦克风已暂停，生成完成后继续聆听"
+                if self.voice_enabled
+                else "正在生成图片"
+            )
+            self.voice_overlay.answer_label.setText("正在生成图片…")
 
     def _start_agent(self, action: LocalAction) -> None:
         if not self._begin_worker("agent", RuntimeState.EXECUTING):
@@ -1798,6 +2068,8 @@ class VoiceWindow(QMainWindow):
             "asr", RuntimeState.STANDBY if wake_only else RuntimeState.LISTENING
         ):
             return
+        if not wake_only:
+            self._sync_listening_ui(True)
         self.asr_wake_only = wake_only
         self.asr_stop = threading.Event()
         stopped = self.asr_stop
@@ -1951,7 +2223,9 @@ class VoiceWindow(QMainWindow):
             self.voice_overlay.answer_label.clear()
 
     def _show_tts_segment(self, text: str) -> None:
-        if text and not self.chat_stop.is_set() and (self.chat_running or self.agent_running):
+        if text and not self.chat_stop.is_set() and (
+            self.chat_running or self.agent_running or self.image_running
+        ):
             self.chat_wait_timer.stop()
             self._set_runtime_state(RuntimeState.SPEAKING)
         if self.current_mode == "voice":
@@ -2020,6 +2294,18 @@ class VoiceWindow(QMainWindow):
             self._scroll_bottom()
 
     def _chat_finished(self, answer: str, interrupted: bool, elapsed: float) -> None:
+        tool_call = getattr(self.chat, "last_tool_call", None)
+        if tool_call and not interrupted:
+            self.chat_wait_timer.stop()
+            self.pending_image_prompt = tool_call["prompt"]
+            if self.current_assistant:
+                self.current_assistant.text_label.setText("已理解你的要求，正在准备生成图片…")
+                self.current_assistant.set_meta(
+                    f"对话模型 {combo_value(self.model_combo)} 已调用生图工具 · {elapsed:.2f} 秒"
+                )
+            if self.current_mode == "voice":
+                self.voice_overlay.answer_label.setText("正在生成图片…")
+            return
         if self.current_assistant:
             if not self.current_assistant.text_label.text():
                 self.current_assistant.text_label.setText("已中断" if interrupted else answer)
@@ -2043,6 +2329,43 @@ class VoiceWindow(QMainWindow):
             self.voice_overlay.answer_label.setText(message)
         self._set_status("操作完成" if ok else "操作未执行", "ready" if ok else "error")
 
+    def _image_finished(self, path: str, elapsed: float) -> None:
+        prompt = getattr(self, "active_image_prompt", "")
+        if self.chat:
+            self.chat.record_image_result(prompt, path)
+        if self.current_assistant:
+            self.current_assistant.text_label.setText("图片已生成")
+            self.current_assistant.set_image(path)
+            self.current_assistant.set_meta(
+                f"生图模型 {combo_value(self.image_model_combo)} · {elapsed:.2f} 秒 · {path}"
+            )
+        self.current_assistant = None
+        if self.current_mode == "voice" and not self.tts_check.isChecked():
+            self.voice_overlay.answer_label.setText("图片已生成并保存到本地。")
+        self._set_status("图片已保存", "ready")
+        self._scroll_bottom()
+
+    def _image_failed(self, message: str, elapsed: float) -> None:
+        prompt = getattr(self, "active_image_prompt", "")
+        if self.chat:
+            self.chat.record_image_result(prompt, None)
+        if self.current_assistant:
+            self.current_assistant.text_label.setText(f"生图失败：{message}")
+            self.current_assistant.set_meta(f"生图请求 · {elapsed:.2f} 秒")
+        self.current_assistant = None
+        self.has_error = True
+        self._set_status("图片生成失败", "error")
+
+    def _image_cancelled(self, elapsed: float) -> None:
+        prompt = getattr(self, "active_image_prompt", "")
+        if self.chat:
+            self.chat.record_image_result(prompt, None)
+        if self.current_assistant:
+            self.current_assistant.text_label.setText("已取消生成图片")
+            self.current_assistant.set_meta(f"生图请求已取消 · {elapsed:.2f} 秒")
+        self.current_assistant = None
+        self._set_status("已取消生图", "ready")
+
     def _worker_finished(self, kind: str) -> None:
         if kind == "chat":
             self.chat_wait_timer.stop()
@@ -2055,22 +2378,25 @@ class VoiceWindow(QMainWindow):
                 self._sync_listening_ui(False)
         if self.exiting:
             return
-        if self.pending_prompts and not self.chat_running and not self.asr_running and not self.agent_running:
+        if kind == "chat" and self.pending_image_prompt:
+            prompt = self.pending_image_prompt
+            self.pending_image_prompt = None
+            QTimer.singleShot(0, lambda: self._start_image(prompt))
+            return
+        if self.pending_prompts and not self.runtime.busy:
             self._dispatch_prompt(self.pending_prompts.popleft())
-        elif self.voice_enabled and not self.chat_running and not self.asr_running and not self.agent_running:
+        elif self.voice_enabled and not self.runtime.busy:
             self._set_runtime_state(RuntimeState.READY)
             QTimer.singleShot(180, self._start_asr)
         elif (
             self.current_mode == "compact"
             and self.wake_enabled
-            and not self.chat_running
-            and not self.asr_running
-            and not self.agent_running
+            and not self.runtime.busy
             and not self.has_error
         ):
             self._set_runtime_state(RuntimeState.STANDBY)
             QTimer.singleShot(250, lambda: self._start_asr(True))
-        elif not self.chat_running and not self.asr_running and not self.agent_running and not self.has_error:
+        elif not self.runtime.busy and not self.has_error:
             self._set_runtime_state(
                 RuntimeState.STANDBY if self.current_mode == "compact" else RuntimeState.READY
             )
@@ -2079,6 +2405,7 @@ class VoiceWindow(QMainWindow):
         self.chat_wait_timer.stop()
         was_busy = self.runtime.busy
         self.pending_prompts.clear()
+        self.pending_image_prompt = None
         self.voice_enabled = False
         self._sync_listening_ui(False)
         self.asr_stop.set()
@@ -2095,11 +2422,12 @@ class VoiceWindow(QMainWindow):
         )
 
     def _clear_chat(self) -> None:
-        if self.chat_running or self.asr_running or self.agent_running:
+        if self.runtime.busy:
             self._show_error("请先停止当前任务，再新建对话。")
             return
         if self.chat:
             self.chat.reset()
+        self.pending_image_prompt = None
         while self.messages_layout.count() > 1:
             item = self.messages_layout.takeAt(0)
             if item.widget():
@@ -2112,8 +2440,11 @@ class VoiceWindow(QMainWindow):
 
     def _change_model(self) -> None:
         if self.chat:
-            self.chat.model = self.model_combo.currentData()
-            self._set_status(f"已切换至 {self.chat.model}", "ready")
+            self.chat.model = combo_value(self.model_combo)
+            if "codex-spark" in self.chat.model.lower():
+                self._set_status("Spark 普通对话；生图意图自动交由 Luna 判定", "ready")
+            else:
+                self._set_status(f"已切换至 {self.chat.model}", "ready")
 
     def _device_changed(self) -> None:
         self.asr_stop.set()
@@ -2205,7 +2536,7 @@ class VoiceWindow(QMainWindow):
         self.compact_window.show_near_corner()
         self._set_compact_model_status("待命" if self.asr_model_loaded else "准备中…")
         self._set_runtime_state(RuntimeState.STANDBY)
-        if self.wake_enabled and not self.asr_running and not self.chat_running:
+        if self.wake_enabled and not self.runtime.busy:
             if not self.asr_model_loaded:
                 self._set_compact_model_status("出世中…")
             QTimer.singleShot(180, lambda: self._start_asr(True))
@@ -2226,7 +2557,7 @@ class VoiceWindow(QMainWindow):
         self._set_runtime_state(RuntimeState.LISTENING)
         if wake_was_running:
             self.asr_stop.set()
-        elif not self.asr_running and not self.chat_running:
+        elif not self.runtime.busy:
             self._start_asr(False)
 
     def _show_chat_layer(self) -> None:
@@ -2317,6 +2648,7 @@ class VoiceWindow(QMainWindow):
             RuntimeState.READY: ("就绪", "ready", "已就绪"),
             RuntimeState.LISTENING: ("正在聆听", "listening", "我在听"),
             RuntimeState.PROCESSING: ("AI 正在思考", "busy", "正在思考"),
+            RuntimeState.GENERATING: ("正在生成图片", "busy", "正在生成图片"),
             RuntimeState.EXECUTING: ("正在执行本地操作", "busy", "正在执行"),
             RuntimeState.SPEAKING: ("正在朗读", "busy", "正在回答"),
             RuntimeState.STOPPING: ("正在停止", "busy", "正在停止"),
@@ -2330,6 +2662,7 @@ class VoiceWindow(QMainWindow):
             RuntimeState.READY: "idle",
             RuntimeState.LISTENING: "listening",
             RuntimeState.PROCESSING: "waiting",
+            RuntimeState.GENERATING: "waiting",
             RuntimeState.EXECUTING: "running",
             RuntimeState.SPEAKING: "speaking",
             RuntimeState.STOPPING: "waiting",
@@ -2343,6 +2676,7 @@ class VoiceWindow(QMainWindow):
             RuntimeState.READY: "idle",
             RuntimeState.LISTENING: "listening",
             RuntimeState.PROCESSING: "thinking",
+            RuntimeState.GENERATING: "thinking",
             RuntimeState.EXECUTING: "executing",
             RuntimeState.SPEAKING: "speaking",
             RuntimeState.STOPPING: "thinking",
@@ -2352,6 +2686,11 @@ class VoiceWindow(QMainWindow):
             self.live2d_view.set_state(live2d_state)
         voice_controls_enabled = not self.runtime.busy
         for control in (
+            self.model_combo,
+            self.image_model_combo,
+            self.provider_url_input,
+            self.provider_key_input,
+            self.refresh_models_button,
             self.tts_voice_combo,
             self.tts_rate_slider,
             self.tts_volume_slider,
@@ -2556,8 +2895,9 @@ QLabel#sidebarFooter { color: #464d59; font-size: 8px; padding: 4px; }
 QPushButton#newChatButton { color: #d6dae4; background: #171a21; border: 1px solid #252a33; border-radius: 7px; text-align: left; padding: 0 14px; }
 QPushButton#newChatButton:hover { color: white; background: #1d212a; border-color: #333946; }
 QComboBox { color: #e5e8ef; background: #11151d; border: 1px solid #2a303b; border-radius: 7px; padding: 7px 9px; min-height: 27px; }
-QComboBox:hover, QTextEdit:focus { border-color: #426bd1; }
+QComboBox:hover, QTextEdit:focus, QLineEdit:focus { border-color: #426bd1; }
 QComboBox QAbstractItemView { color: #edf0f7; background: #12161e; border: 1px solid #303744; selection-background-color: #253963; outline: 0; }
+QLineEdit#providerInput { color: #e5e8ef; background: #11151d; border: 1px solid #2a303b; border-radius: 7px; padding: 7px 9px; min-height: 27px; }
 QLabel#greeting { color: #f6f7fb; font-size: 24px; font-weight: 600; }
 QLabel#welcomeSubtitle { color: #858d9c; font-size: 12px; }
 QWidget#voiceDock { background: transparent; }
@@ -2587,6 +2927,9 @@ QFrame#assistantBubble, QFrame#userBubble { background: transparent; border: 0; 
 QLabel#bubbleRole { color: #6d85c7; font-size: 10px; font-weight: 600; }
 QLabel#bubbleText { color: #e9ebf0; font-size: 14px; }
 QLabel#bubbleMeta { color: #606977; font-size: 9px; }
+QLabel#generatedImage { background: #090c12; border: 1px solid #29313d; border-radius: 6px; padding: 3px; }
+QPushButton#openImageButton, QPushButton#refreshModelsButton { color: #dbe7ff; background: #18243a; border: 1px solid #31507d; border-radius: 7px; padding: 8px 12px; }
+QPushButton#openImageButton:hover, QPushButton#refreshModelsButton:hover { color: white; background: #203252; border-color: #4d73ad; }
 QFrame#settingsPanel { background: #0d1118; border-left: 1px solid #252b35; border-bottom-right-radius: 14px; }
 QWidget#settingsContent { background: transparent; }
 QLabel#panelHeading { color: #f3f4f7; font-size: 16px; font-weight: 600; }

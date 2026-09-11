@@ -31,5 +31,6 @@ build/
 dist/
 *.egg-info/
 ui-preview/
+generated-images/
 .idea/
 .vscode/

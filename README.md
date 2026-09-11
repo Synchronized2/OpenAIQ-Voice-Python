@@ -2,6 +2,27 @@
 
 Windows 语音对话程序：FireRedVAD 实时端点检测、Paraformer-large 本地识别、OpenAI 兼容聊天节点、Edge TTS 朗读。
 
+## 对话与生图
+
+图形界面的设置面板可填写 OpenAI 兼容服务 URL 和 API Key。点击“获取模型列表”后，
+程序调用服务的 `/models` 接口，将模型分为窗口顶部的“对话模型”和设置中的“生图模型”；
+两个选择框都支持直接输入模型 ID，因此兼容没有正确标注类型或不支持模型列表的中转服务。
+URL、Key 和模型选择保存在本机已被 Git 忽略的 `ui-settings.json` 中，不会进入仓库。
+
+所有输入都先进入正常对话。对话模型会根据上下文决定是否调用 `generate_image` 工具；例如
+聊天过程中说“我想要生成一张月球上的孙悟空照片”，模型会整理提示词并主动启动当前选择的
+生图模型。关于画画技巧、如何生成图片等普通问题可直接回答，不会靠本地关键词硬分流。
+结果支持 Base64 或 HTTPS URL 返回，验证为 PNG、JPEG、WebP 后
+自动保存到项目的 `generated-images/`，聊天中显示预览和“打开图片”按钮。目录已加入
+`.gitignore`。生图请求可用停止按钮取消本地等待；服务端是否停止计费由中转服务决定。
+语音模式进入生图阶段后会暂停麦克风和语音打断监听，并明确显示“正在生成图片”；图片任务
+完成后自动恢复 ASR，继续当前语音对话。按停止按钮取消任务时不会自动恢复监听。
+
+工具调用能力取决于对话模型和中转节点。当前节点实测 `gpt-5.6-luna`、`gpt-5.6-terra`
+可以调用生图工具；`gpt-5.3-codex-spark` 会理解生图意图但拒绝发出工具调用。选择 Spark
+时，程序只对疑似创建图片的请求使用 Luna 做一次模型工具判定，普通问题仍由 Spark 回答。
+最终由 Luna 确认并调用 `generate_image`，不是本地关键词直接触发生图。
+
 ## 新电脑首次安装
 
 使用 **Windows 10/11、64 位 Python 3.11 或 3.12**，无需复制旧电脑的虚拟环境。
@@ -74,7 +95,11 @@ git push
 编辑 `config.py`（也可以在启动菜单选择模型）：
 
 - `CHAT_API_KEY`：可选，留空时依次读取系统环境变量 `PCIE_API_KEY`、`OPENAI_API_KEY`
-- `CHAT_MODEL`：启动时直接回车使用的默认模型，新安装默认为 `gpt-5.3-codex-spark`
+- `CHAT_MODEL`：启动时直接回车使用的默认模型，新安装默认为 `gpt-5.6-luna`
+- `IMAGE_MODEL`：对话模型调用工具后实际使用的生图模型，默认 `gpt-image-2`
+- `IMAGE_OUTPUT_DIR`：生成图片的本地保存目录，默认项目内 `generated-images`
+- `IMAGE_TOOL_ROUTER_MODEL`：当前对话模型不兼容工具时用于判断生图意图的模型
+- `IMAGE_TOOL_INCOMPATIBLE_MODELS`：需要兼容判定的对话模型名称片段
 - `WAKE_WORD_ENABLED`：图形界面是否在桌面常驻状态监听“悟空”等唤醒词
 - `ASR_VAD_END_SILENCE`：检测到语音后，连续静音多久提交当前命令，默认 `0.7` 秒
 - `ASR_HOTWORDS`：应用名称、唤醒词和 Agent 指令中的识别热词
